@@ -1,12 +1,7 @@
-# Pyra
+# PyrA
 
-Pyra is a standalone C++20 library for reading and rendering tiled,
+PyrA is a standalone C++20 library for reading and rendering tiled,
 multiresolution whole-slide images. Its GitHub repository is **PyrA**.
-
-This is an independent source fork of the Pyr module from WSIA. It starts
-with fresh Git history and has no dependency on WSIA, Qt, PRIML, or TCU.
-The initial fork preserves the existing header names, `priml::` and `pyr::`
-C++ namespaces, and `PYR_WITH_*` feature switches.
 
 ## Features
 
@@ -47,7 +42,6 @@ Use `CMAKE_PREFIX_PATH` or CMake's `TIFF_INCLUDE_DIR`, `TIFF_LIBRARY`,
 | `PYR_WITH_CZI` | OFF | libCZI, linked dynamically |
 | `BUILD_TESTING` | ON | None; tests generate their own small images |
 
-The optional integrations inherit the original Pyr build conventions.
 libCZI must use a compatible C++ runtime and remain dynamically linked.
 Third-party libraries retain their own licenses and distribution requirements.
 
@@ -64,14 +58,8 @@ configuration, and link dependencies. Include `wsi.h` for the reader,
 Logging can be redirected with `pyr::set_log_sink`; otherwise it writes
 to stderr. No host-defined service symbols are required.
 
-## Scope of the initial fork
-
-The WSIA checkout continues to use its original `pyr/` directory. Pyra is
-maintained independently; no automatic synchronization is configured.
-
 The standalone tests cover generated images and reader/codec integration.
 They do not replace validation against real SVS, NDPI, DICOM, or CZI slides.
 Initial validation uses Windows x64, MSVC 19.51, Release, with JPEG and
-OpenJPEG enabled. JPEG XL, DICOM, CZI, and non-Windows builds have not been
-validated for this fork.
+OpenJPEG enabled. 
 No source-code license is selected by this initial fork.
