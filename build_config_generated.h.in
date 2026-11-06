@@ -1,0 +1,6 @@
+#pragma once
+
+#cmakedefine01 USE_DCMTK
+#cmakedefine01 USE_OPENJPEG
+#cmakedefine01 USE_JXL
+#cmakedefine01 USE_CZI

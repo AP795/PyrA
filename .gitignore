@@ -1,0 +1,39 @@
+# Agent instructions and local tooling stay private.
+AGENTS.md
+CLAUDE.md
+**/CLAUDE.md
+.agents/
+.claude/
+.codex/
+.scratch/
+.vs/
+.vscode/
+
+# Build products and local settings.
+/build/
+/bld/
+/out/
+test_out/
+CMakeUserPresets.json
+*.user
+*.obj
+*.pdb
+*.exe
+*.dll
+*.lib
+*.log
+*.bak
+*.tmp
+__pycache__/
+
+# Credentials and local slide fixtures.
+.env
+.env.*
+*.secret
+*.pem
+*.pfx
+*.p12
+*.ndpi
+*.svs
+*.czi
+*.dcm
