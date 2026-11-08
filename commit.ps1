@@ -50,6 +50,10 @@ try {
 	Invoke-Git push
 } finally {
 	foreach ($name in $savedGitEnvironment.Keys) {
-		[Environment]::SetEnvironmentVariable($name, $savedGitEnvironment[$name], 'Process')
+		if ([string]::IsNullOrEmpty($savedGitEnvironment[$name])) {
+			Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+		} else {
+			[Environment]::SetEnvironmentVariable($name, $savedGitEnvironment[$name], 'Process')
+		}
 	}
 }
