@@ -31,6 +31,7 @@ option(PYR_WITH_OPENJPEG "JPEG 2000 tiles (Aperio 33003/33005, DICOM .90/.91)" O
 option(PYR_WITH_JXL      "JPEG XL tile and image codec"                        OFF)
 option(PYR_WITH_DCMTK    "DICOM VL Whole Slide Microscopy loader"              OFF)
 option(PYR_WITH_CZI      "Zeiss CZI loader (libCZI, LGPL - link dynamically)"  OFF)
+option(PYRA_BUILD_GUI_TEST "Build the optional Qt Widgets viewer/evaluator" OFF)
 
 find_package(TIFF REQUIRED)
 find_package(JPEG REQUIRED)
@@ -220,4 +221,8 @@ if(PYR_WITH_CZI)
 	find_path(LIBCZI_INCLUDE_DIR NAMES libCZI.h REQUIRED)
 	target_include_directories(pyra PRIVATE ${LIBCZI_INCLUDE_DIR})
 	target_link_libraries(pyra PRIVATE ${LIBCZI_LIBRARY})
+endif()
+
+if(PYRA_BUILD_GUI_TEST)
+	add_subdirectory(tests/gui)
 endif()

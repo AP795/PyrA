@@ -41,6 +41,7 @@ Use `CMAKE_PREFIX_PATH` or CMake's `TIFF_INCLUDE_DIR`, `TIFF_LIBRARY`,
 | `PYR_WITH_DCMTK` | OFF | DCMTK |
 | `PYR_WITH_CZI` | OFF | libCZI, linked dynamically |
 | `BUILD_TESTING` | ON | None; tests generate their own small images |
+| `PYRA_BUILD_GUI_TEST` | OFF | Qt 6 Widgets; viewer and performance evaluator |
 
 libCZI must use a compatible C++ runtime and remain dynamically linked.
 Third-party libraries retain their own licenses and distribution requirements.
@@ -58,8 +59,29 @@ configuration, and link dependencies. Include `wsi.h` for the reader,
 Logging can be redirected with `pyr::set_log_sink`; otherwise it writes
 to stderr. No host-defined service symbols are required.
 
+## Linux test GUI
+
+The optional viewer lives in [`tests/gui/`](tests/gui/README.md). It provides
+pan/zoom, a navigable minimap, channel/Z selection, metadata, and a
+Record / Stop / Replay render performance evaluator. See that directory for Ubuntu 24.04 and WSLg setup,
+build commands, and timing semantics. Qt links only to the test application.
+The viewer reads configuration and saves its last successfully opened image
+under `~/.config/pyra_gui_test/`, restoring that image on the next normal start.
+
+## Scope of the initial fork
+
+The WSIA checkout continues to use its original `pyr/` directory. Pyra is
+maintained independently; no automatic synchronization is configured.
+
 The standalone tests cover generated images and reader/codec integration.
 They do not replace validation against real SVS, NDPI, DICOM, or CZI slides.
-Initial validation uses Windows x64, MSVC 19.51, Release, with JPEG and
-OpenJPEG enabled. 
-No source-code license is selected by this initial fork.
+Validation covers Windows x64 with MSVC 19.51 and Ubuntu 24.04 x64 with
+GCC 13, both in Release with JPEG and OpenJPEG enabled. The optional Qt test
+viewer/evaluator also passes its synthetic checks through WSLg in Client.
+JPEG XL, DICOM, CZI, and real-slide GUI performance have not been validated
+for this fork.
+
+## License
+
+Pyra is licensed under the [MIT License](license.md).
+Third-party libraries retain their own licenses and distribution requirements.

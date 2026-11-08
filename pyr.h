@@ -1138,8 +1138,10 @@ inline const Pwhl<Rgb> &macro_image ( const Ppyr &pyramid )
 // used to be duplicated as an ad-hoc fallback at each call site.
 inline const Pwhl<Rgb> &label_image ( const Ppyr &pyramid )
 {
-	const auto &frost = aux_image( pyramid, kAuxFrost );
-	return frost.is_set() ? frost : aux_image( pyramid, kAuxMacro );
+// Borrow the stored raster explicitly: GCC 13 otherwise warns about the
+// temporary string used as the lookup key, whose lifetime is unrelated.
+	const auto *frost = &aux_image( pyramid, kAuxFrost );
+	return frost->is_set() ? *frost : aux_image( pyramid, kAuxMacro );
 }
 
 
@@ -1147,8 +1149,8 @@ inline const Pwhl<Rgb> &label_image ( const Ppyr &pyramid )
 // has one, otherwise the macro.
 inline const Pwhl<Rgb> &slide_overview_image ( const Ppyr &pyramid )
 {
-	const auto &overview = aux_image( pyramid, kAuxOverview );
-	return overview.is_set() ? overview : aux_image( pyramid, kAuxMacro );
+	const auto *overview = &aux_image( pyramid, kAuxOverview );
+	return overview->is_set() ? *overview : aux_image( pyramid, kAuxMacro );
 }
 
 
