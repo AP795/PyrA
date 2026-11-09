@@ -8,7 +8,7 @@
 
 namespace pyra::test {
 
-QString write_test_slide ( const QString &directory )
+QString write_test_wsi ( const QString &directory )
 {
 	const auto tool = QDir( QCoreApplication::applicationDirPath() ).filePath(
 #ifdef _WIN32

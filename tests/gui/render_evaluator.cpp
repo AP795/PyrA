@@ -161,8 +161,8 @@ RenderEvaluator::RenderEvaluator ()
 
 RenderEvaluator::~RenderEvaluator ()
 {
-	if (slide_)
-		pyra_close( slide_, nullptr );
+	if (wsi_)
+		pyra_close( wsi_, nullptr );
 	pyra_context_destroy( context_, nullptr );
 }
 
@@ -172,24 +172,24 @@ OpenInfo RenderEvaluator::open ( const QString &path )
 	recording_ = false;
 	recorded_.clear();
 	planes_.clear();
-	if (slide_)
-		pyra_close( std::exchange( slide_, nullptr ), nullptr );
+	if (wsi_)
+		pyra_close( std::exchange( wsi_, nullptr ), nullptr );
 	auto info = OpenInfo{};
 	auto error = pyra_error{};
 	const auto utf8 = path.toUtf8();
-	if (pyra_open( context_, utf8.constData(), &slide_, &error ) != PYRA_OK) {
+	if (pyra_open( context_, utf8.constData(), &wsi_, &error ) != PYRA_OK) {
 		info.error = QString::fromUtf8( error.message );
 		return info;
 	}
 	auto count = uint32_t{};
-	if (pyra_get_plane_count( slide_, &count, &error ) != PYRA_OK) {
+	if (pyra_get_plane_count( wsi_, &count, &error ) != PYRA_OK) {
 		info.error = QString::fromUtf8( error.message );
 		return info;
 	}
 	for (uint32_t i = 0; i < count; ++i) {
 		auto plane = pyra_plane_info{};
 		plane.struct_size = sizeof( plane );
-		if (pyra_get_plane_info( slide_, i, &plane, &error ) != PYRA_OK)
+		if (pyra_get_plane_info( wsi_, i, &plane, &error ) != PYRA_OK)
 			continue;
 		const auto name = QString::fromUtf8( plane.channel );
 		const auto label = QStringLiteral( "%1 | z=%2 | %3 levels" )
@@ -200,13 +200,13 @@ OpenInfo RenderEvaluator::open ( const QString &path )
 			float( plane.native_mpp ), label, i, plane.pixel_format, plane.max_sample_value } );
 	}
 	info.metadata = QStringLiteral( "%1\n\n" ).arg( path );
-	if (pyra_get_property_count( slide_, &count, &error ) != PYRA_OK) {
+	if (pyra_get_property_count( wsi_, &count, &error ) != PYRA_OK) {
 		info.error = QString::fromUtf8( error.message );
 		return info;
 	}
 	for (uint32_t i = 0; i < count; ++i) {
 		auto property = pyra_property{};
-		if (pyra_get_property( slide_, i, &property, &error ) == PYRA_OK)
+		if (pyra_get_property( wsi_, i, &property, &error ) == PYRA_OK)
 			info.metadata += QString::fromUtf8( property.key ) + QStringLiteral( " = " ) +
 				QString::fromUtf8( property.value ) + QLatin1Char( '\n' );
 	}
@@ -228,7 +228,7 @@ RenderResult RenderEvaluator::overview ( const PlaneSelection &plane )
 	const auto found = std::find_if( planes_.begin(), planes_.end(), [&] ( const auto &info ) {
 		return info.plane == plane;
 	} );
-	if (!slide_ || found == planes_.end()) {
+	if (!wsi_ || found == planes_.end()) {
 		auto result = RenderResult{};
 		result.error = QStringLiteral( "No overview geometry is available for this plane." );
 		return result;
@@ -244,7 +244,7 @@ RenderResult RenderEvaluator::render_frame ( const RenderRequest &request,
 {
 	auto result = RenderResult{};
 	result.request = request;
-	if (!slide_ || !valid_request( request )) {
+	if (!wsi_ || !valid_request( request )) {
 		result.error = QStringLiteral( "No open slide or invalid render rectangle/mpp." );
 		return result;
 	}
@@ -260,7 +260,7 @@ RenderResult RenderEvaluator::render_frame ( const RenderRequest &request,
 	auto layout = pyra_image_layout{};
 	layout.struct_size = sizeof( layout );
 	auto error = pyra_error{};
-	if (pyra_get_image_layout( slide_, &native, &layout, &error ) != PYRA_OK) {
+	if (pyra_get_image_layout( wsi_, &native, &layout, &error ) != PYRA_OK) {
 		result.error = QString::fromUtf8( error.message );
 		return result;
 	}
@@ -276,7 +276,7 @@ RenderResult RenderEvaluator::render_frame ( const RenderRequest &request,
 		auto buffer = pyra_image_buffer{ sizeof( pyra_image_buffer ), layout.pixel_format,
 			pixels.data(), pixels.size(), layout.row_stride_bytes };
 		const auto start = Clock::now();
-		const auto status = pyra_get_image( slide_, &native, &buffer, &error );
+		const auto status = pyra_get_image( wsi_, &native, &buffer, &error );
 		result.render_ms = elapsed_ms( start );
 		result.incomplete = status == PYRA_INCOMPLETE;
 		if (status != PYRA_OK && status != PYRA_INCOMPLETE) {
@@ -296,7 +296,7 @@ RenderResult RenderEvaluator::render_frame ( const RenderRequest &request,
 void RenderEvaluator::record ()
 {
 	recorded_.clear();
-	recording_ = slide_ != nullptr;
+	recording_ = wsi_ != nullptr;
 }
 
 
@@ -312,7 +312,7 @@ ReplayReport RenderEvaluator::replay ()
 	recording_ = false;
 	auto report = ReplayReport{};
 	report.recorded = recorded_.size();
-	if (!slide_ || recorded_.empty()) {
+	if (!wsi_ || recorded_.empty()) {
 		report.error = QStringLiteral( "Record at least one render on the currently open slide first." );
 		return report;
 	}

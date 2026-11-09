@@ -72,7 +72,7 @@ void test_recording_exact_order_and_stop ( const QString &path )
 }
 
 
-void test_recording_restart_and_slide_replacement ( const QString &path )
+void test_recording_restart_and_wsi_replacement ( const QString &path )
 {
 	auto evaluator = pyra::test::RenderEvaluator{};
 	require( evaluator.open( path ).error.isEmpty(), "Open failed" );
@@ -247,7 +247,7 @@ int main ( int argc, char **argv )
 		std::cout << name << ": " << ( passed ? "PASS" : "FAIL" ) << " (" << us << " us)\n";
 	};
 	try {
-		const auto path = pyra::test::write_test_slide( QString::fromLocal8Bit( argv[1] ) );
+		const auto path = pyra::test::write_test_wsi( QString::fromLocal8Bit( argv[1] ) );
 		run( "test_timings_known_distribution", test_timings_known_distribution );
 		run( "test_timings_empty_and_even_distribution", test_timings_empty_and_even_distribution );
 		run( "test_prepared_view_coverage_and_limits", test_prepared_view_coverage_and_limits );
@@ -256,7 +256,7 @@ int main ( int argc, char **argv )
 			test_unsupported_compression_error( QString::fromLocal8Bit( argv[2] ) );
 		} );
 		run( "test_recording_exact_order_and_stop", [&] { test_recording_exact_order_and_stop( path ); } );
-		run( "test_recording_restart_and_slide_replacement", [&] { test_recording_restart_and_slide_replacement( path ); } );
+		run( "test_recording_restart_and_wsi_replacement", [&] { test_recording_restart_and_wsi_replacement( path ); } );
 		run( "test_replay_cancel_before_first_call", [&] { test_replay_cancel_before_first_call( path ); } );
 		run( "test_render_invalid_request_is_rejected", [&] { test_render_invalid_request_is_rejected( path ); } );
 		run( "test_overview_preserves_recording_and_plane_selection", [&] { test_overview_preserves_recording_and_plane_selection( path ); } );

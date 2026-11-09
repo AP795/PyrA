@@ -11,7 +11,7 @@ int main ( int argc, char **argv )
 	if (application.arguments().size() != 2)
 		return 2;
 	try {
-		(void)pyra::test::write_test_slide( application.arguments()[1] );
+		(void)pyra::test::write_test_wsi( application.arguments()[1] );
 		return 0;
 	} catch (const std::exception &error) {
 		std::cerr << error.what() << '\n';

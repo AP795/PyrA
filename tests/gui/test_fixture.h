@@ -4,6 +4,6 @@
 
 namespace pyra::test {
 
-QString write_test_slide ( const QString &directory );
+QString write_test_wsi ( const QString &directory );
 
 } // namespace pyra::test

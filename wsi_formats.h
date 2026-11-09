@@ -1,7 +1,7 @@
 #pragma once
 
 // Which pyramid file formats this build can open - small on purpose, so that a
-// header that only classifies paths (priml/slide_kind.h) can ask without pulling
+// header that only classifies WSI paths can ask without pulling
 // in the reader.
 
 #include "build_config.h"

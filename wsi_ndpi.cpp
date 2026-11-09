@@ -132,11 +132,11 @@ static float AspectRatio ( const Pwhl<pixeltype> &img ) {
 }
 
 
-static bool HasSlideLikeAspect ( float img_aspect, float slide_aspect ) {
-	if (img_aspect <= 0.0f || slide_aspect <= 0.0f)
+static bool HasWsiLikeAspect ( float img_aspect, float wsi_aspect ) {
+	if (img_aspect <= 0.0f || wsi_aspect <= 0.0f)
 		return false;
 
-	auto ratio = img_aspect / slide_aspect;
+	auto ratio = img_aspect / wsi_aspect;
 	if (ratio < 1.0f)
 		ratio = 1.0f / ratio;
 	return ratio <= 1.2f;
@@ -145,21 +145,21 @@ static bool HasSlideLikeAspect ( float img_aspect, float slide_aspect ) {
 
 template <typename pixeltype>
 static void AssignAuxImage ( Ppyr &pyramid, Pwhl<pixeltype> &&img,
-	float slide_aspect )
+	float wsi_aspect )
 {
 	auto area = AuxArea( img );
 	if (area == 0)
 		return;
 
 	auto img_aspect = AspectRatio( img );
-	auto slide_like = HasSlideLikeAspect( img_aspect, slide_aspect );
+	auto wsi_like = HasWsiLikeAspect( img_aspect, wsi_aspect );
 
 //
 // A slide-shaped aux IFD is the MACRO, not a tissue-only overview: an NDPI's is
 // a composite of two captures - the printed label panel at one end (reflected
 // light) and the slide itself (transmitted light) - so it shows the whole glass.
 // Anything not slide-shaped is a genuine label.
-	if (slide_like) {
+	if (wsi_like) {
 		auto &macro = aux_slot( pyramid, kAuxMacro );
 		if (area > AuxArea( macro ))
 			macro = std::move( img );
@@ -172,13 +172,13 @@ static void AssignAuxImage ( Ppyr &pyramid, Pwhl<pixeltype> &&img,
 
 
 template <typename pixeltype>
-static void LogAuxAssignment ( const Pwhl<pixeltype> &img, float slide_aspect )
+static void LogAuxAssignment ( const Pwhl<pixeltype> &img, float wsi_aspect )
 {
 	auto img_aspect = AspectRatio( img );
-	auto slide_like = HasSlideLikeAspect( img_aspect, slide_aspect );
+	auto wsi_like = HasWsiLikeAspect( img_aspect, wsi_aspect );
 	pyr::plog( "NDPI aux IFD: %dx%d aspect=%.3f -> %s\n",
 		img.w, img.h, img_aspect,
-		slide_like ? "macro-candidate" : "label-candidate" );
+		wsi_like ? "macro-candidate" : "label-candidate" );
 }
 
 
@@ -327,7 +327,7 @@ static void AppendNdpiTiles ( const Dim2D<uint32_t> &dimensions,
 static void ProcessNdpiIfd ( TIFF *tif,
 	const std::string &filename,
 	int ifd_index,
-	float slide_aspect,
+	float wsi_aspect,
 	Ppyr *pyramid )
 {
 	auto level = Level{};
@@ -361,8 +361,8 @@ static void ProcessNdpiIfd ( TIFF *tif,
 	if (level.block_sizes.empty()) {
 		auto auxiliary = Pwhl<Rgb>{};
 		if (LoadStandardIFD( tif, auxiliary )) {
-			LogAuxAssignment( auxiliary, slide_aspect );
-			AssignAuxImage( *pyramid, std::move( auxiliary ), slide_aspect );
+			LogAuxAssignment( auxiliary, wsi_aspect );
+			AssignAuxImage( *pyramid, std::move( auxiliary ), wsi_aspect );
 		}
 		else
 			pyr::plog( "NDPI aux IFD: %ux%u not loadable, skipped\n", width, height );
@@ -415,7 +415,7 @@ bool NdpiLoader::Open ( Ppyr &pyramid ) {
 		set_property( pyramid, "hamamatsu.Reference",
 			ReadNdpiAscii( tif, NDPI_REFERENCE ) );
 		if (lens > 0.0f)
-			set_property( pyramid, "openslide.objective-power",
+			set_property( pyramid, "pyra.objective-power",
 				std::to_string( lens ) );
 	}
 
@@ -428,15 +428,15 @@ bool NdpiLoader::Open ( Ppyr &pyramid ) {
 		pyramid.barcode_from_metadata = !pyramid.barcode.empty();
 	}
 
-	uint32_t slide_w = 0, slide_h = 0;
-	TIFFGetField( tif, TIFFTAG_IMAGEWIDTH, &slide_w );
-	TIFFGetField( tif, TIFFTAG_IMAGELENGTH, &slide_h );
-	auto slide_aspect = slide_h > 0 ? (float)slide_w / (float)slide_h : 0.0f;
+	uint32_t wsi_w = 0, wsi_h = 0;
+	TIFFGetField( tif, TIFFTAG_IMAGEWIDTH, &wsi_w );
+	TIFFGetField( tif, TIFFTAG_IMAGELENGTH, &wsi_h );
+	auto wsi_aspect = wsi_h > 0 ? (float)wsi_w / (float)wsi_h : 0.0f;
 
 	int ifd_idx = 0;
 	do {
 		ProcessNdpiIfd(
-			tif, this->filename_, ifd_idx, slide_aspect, &pyramid );
+			tif, this->filename_, ifd_idx, wsi_aspect, &pyramid );
 
 		++ifd_idx;
 	} while (TIFFReadDirectory( tif ));

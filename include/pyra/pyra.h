@@ -23,7 +23,7 @@ extern "C" {
 #define PYRA_ERROR_MESSAGE_SIZE 512u
 
 typedef struct pyra_context pyra_context;
-typedef struct pyra_slide pyra_slide;
+typedef struct pyra_wsi pyra_wsi;
 typedef int32_t pyra_status;
 typedef uint32_t pyra_pixel_format;
 
@@ -115,8 +115,8 @@ typedef struct pyra_context_stats {
 	uint64_t compressed_cache_bytes;
 	uint64_t decoded_cache_bytes;
 	uint64_t cache_pool_evictions;
-	uint64_t shared_slides;
-	uint64_t slide_handles;
+	uint64_t shared_wsis;
+	uint64_t wsi_handles;
 	uint64_t render_calls;
 	uint64_t incomplete_renders;
 } pyra_context_stats;
@@ -127,7 +127,7 @@ typedef struct pyra_context_stats {
 PYRA_API void pyra_context_options_init ( pyra_context_options *options );
 PYRA_API pyra_status pyra_context_create ( const pyra_context_options *options,
 	pyra_context **context, pyra_error *error );
-// Returns BUSY while slide handles exist. Destroy/close must not race handle use.
+// Returns BUSY while WSI handles exist. Destroy/close must not race handle use.
 PYRA_API pyra_status pyra_context_destroy ( pyra_context *context, pyra_error *error );
 PYRA_API pyra_status pyra_context_get_stats ( pyra_context *context,
 	pyra_context_stats *stats, pyra_error *error );
@@ -135,22 +135,22 @@ PYRA_API pyra_status pyra_context_get_stats ( pyra_context *context,
 // Paths and returned strings are UTF-8. Opens of the same canonical source in
 // one context share storage. Sources must remain unchanged until all handles close.
 PYRA_API pyra_status pyra_open ( pyra_context *context, const char *path_utf8,
-	pyra_slide **slide, pyra_error *error );
-PYRA_API pyra_status pyra_close ( pyra_slide *slide, pyra_error *error );
-PYRA_API pyra_status pyra_get_plane_count ( pyra_slide *slide,
+	pyra_wsi **wsi, pyra_error *error );
+PYRA_API pyra_status pyra_close ( pyra_wsi *wsi, pyra_error *error );
+PYRA_API pyra_status pyra_get_plane_count ( pyra_wsi *wsi,
 	uint32_t *count, pyra_error *error );
-// channel/key/value pointers are borrowed and valid until this slide handle closes.
-PYRA_API pyra_status pyra_get_plane_info ( pyra_slide *slide, uint32_t plane_index,
+// channel/key/value pointers are borrowed and valid until this WSI handle closes.
+PYRA_API pyra_status pyra_get_plane_info ( pyra_wsi *wsi, uint32_t plane_index,
 	pyra_plane_info *info, pyra_error *error );
-PYRA_API pyra_status pyra_get_property_count ( pyra_slide *slide,
+PYRA_API pyra_status pyra_get_property_count ( pyra_wsi *wsi,
 	uint32_t *count, pyra_error *error );
-PYRA_API pyra_status pyra_get_property ( pyra_slide *slide, uint32_t index,
+PYRA_API pyra_status pyra_get_property ( pyra_wsi *wsi, uint32_t index,
 	pyra_property *property, pyra_error *error );
 
 // Dimensions are ceil(rectangle extent / mpp), snapping ratios within 1e-9
 // relative error of an integer to that integer. Layout and rendering agree.
 // Rendering samples the full half-open rectangle, with zero outside the plane.
-PYRA_API pyra_status pyra_get_image_layout ( pyra_slide *slide,
+PYRA_API pyra_status pyra_get_image_layout ( pyra_wsi *wsi,
 	const pyra_image_request *request, pyra_image_layout *layout, pyra_error *error );
 // Synchronous; retains no destination memory. Rows are top-down, RGB interleaved,
 // integers native-endian, float IEEE-754 binary32. Padding is left untouched.
@@ -158,7 +158,7 @@ PYRA_API pyra_status pyra_get_image_layout ( pyra_slide *slide,
 // buffer contains available pixels with zero in missing areas. Other failures
 // leave the destination unchanged. All C++ exceptions are translated to status.
 // Unavailable decoders return UNSUPPORTED and name the compression/build option.
-PYRA_API pyra_status pyra_get_image ( pyra_slide *slide,
+PYRA_API pyra_status pyra_get_image ( pyra_wsi *wsi,
 	const pyra_image_request *request, const pyra_image_buffer *destination,
 	pyra_error *error );
 

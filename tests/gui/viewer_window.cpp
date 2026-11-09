@@ -399,7 +399,7 @@ void ViewerWindow::smoke_test ( const QString &output_directory )
 	smoke_output_ = output_directory;
 	smoke_step_ = 0;
 	try {
-		open( write_test_slide( output_directory ) );
+		open( write_test_wsi( output_directory ) );
 	} catch (const std::exception &error) {
 		std::cerr << error.what() << '\n';
 		smoke_finish( 1 );

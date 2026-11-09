@@ -455,7 +455,7 @@ struct Level {
 // file stores no layer this coarse (see BuildCoarseLevels in wsi.cpp). Its tiles
 // own their pixels and are already Ready, so the load/decode path skips them.
 	bool synthetic = false;
-	bool reject_whole_slide_black = false;
+	bool reject_whole_wsi_black = false;
 // Only for encodings that cannot describe their own colour space: Aperio
 // compression 33003 stores YCbCr with the JPEG 2000 MCT off, so the container
 // tag is the sole source. FromStream (the default) is correct everywhere else.
@@ -764,9 +764,9 @@ inline Pwhl<Rgb> compose_rgb_from_channels ( const std::vector<NamedChannelPixel
 }
 
 
-// One metadata item. Normalised keys follow OpenSlide's vocabulary
-// ("openslide.mpp-x", "openslide.objective-power", ...) so the two are directly
-// comparable; the raw tag a normalised value came from is kept alongside under
+// One metadata item. Normalised keys use Pyra's own namespace
+// ("pyra.mpp-x", "pyra.objective-power", ...).
+// The raw tag a normalised value came from is kept alongside under
 // its own per-format prefix ("tiff.XResolution", "aperio.MPP", ...), because the
 // receipt is worth as much as the reading.
 struct Property {
@@ -782,7 +782,7 @@ struct Property {
 //   macro     the whole slide, label AND tissue in one image
 //
 // Most scanners give a label plus a whole-slide macro; a few give a tissue-only
-// overview. Ask through label_image() / slide_overview_image() rather than
+// overview. Ask through label_image() / wsi_overview_image() rather than
 // naming a slot, so a caller does not have to know which kind of file it has.
 inline constexpr const char *kAuxFrost = "frost";
 inline constexpr const char *kAuxOverview = "overview";
@@ -1171,7 +1171,7 @@ inline const Pwhl<Rgb> &label_image ( const Ppyr &pyramid )
 
 // What to show as the whole-slide view: the tissue-only overview when the file
 // has one, otherwise the macro.
-inline const Pwhl<Rgb> &slide_overview_image ( const Ppyr &pyramid )
+inline const Pwhl<Rgb> &wsi_overview_image ( const Ppyr &pyramid )
 {
 	const auto *overview = &aux_image( pyramid, kAuxOverview );
 	return overview->is_set() ? *overview : aux_image( pyramid, kAuxMacro );
@@ -1217,7 +1217,7 @@ inline void record_icc_properties ( Ppyr &pyramid )
 	if (pyramid.icc_profile.empty())
 		return;
 
-	set_property( pyramid, "openslide.icc-size",
+	set_property( pyramid, "pyra.icc-size",
 		std::to_string( pyramid.icc_profile.size() ) );
 
 //
@@ -1273,7 +1273,7 @@ inline void record_icc_properties ( Ppyr &pyramid )
 // would drift. Loaders add what only they know - the raw vendor tags.
 inline void record_derived_properties ( Ppyr &pyramid )
 {
-	set_property( pyramid, "openslide.level-count",
+	set_property( pyramid, "pyra.level-count",
 		std::to_string( pyramid.levels.size() ) );
 
 	auto display_geometry = display_native_geometry( pyramid );
@@ -1283,13 +1283,13 @@ inline void record_derived_properties ( Ppyr &pyramid )
 			? pyramid.source_pixel_metric.x : base_metric;
 		const auto source_y = pyramid.source_pixel_metric.y > 0.0f
 			? pyramid.source_pixel_metric.y : base_metric;
-		set_property( pyramid, "openslide.mpp-x", std::to_string( source_x ) );
-		set_property( pyramid, "openslide.mpp-y", std::to_string( source_y ) );
+		set_property( pyramid, "pyra.mpp-x", std::to_string( source_x ) );
+		set_property( pyramid, "pyra.mpp-y", std::to_string( source_y ) );
 	}
 
 	for (auto i = 0; i < (int)pyramid.levels.size(); ++i) {
 		const auto &level = pyramid.levels[i];
-		auto prefix = "openslide.level[" + std::to_string( i ) + "].";
+		auto prefix = "pyra.level[" + std::to_string( i ) + "].";
 		set_property( pyramid, prefix + "width",
 			std::to_string( level.bounds.br.x - level.bounds.tl.x ) );
 		set_property( pyramid, prefix + "height",
@@ -1308,7 +1308,7 @@ inline void record_derived_properties ( Ppyr &pyramid )
 		const auto &image = aux_image( pyramid, name );
 		if (!image.is_set())
 			continue;
-		auto prefix = "openslide.associated[" + name + "].";
+		auto prefix = "pyra.associated[" + name + "].";
 		set_property( pyramid, prefix + "width", std::to_string( image.w ) );
 		set_property( pyramid, prefix + "height", std::to_string( image.h ) );
 	}

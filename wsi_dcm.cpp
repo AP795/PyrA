@@ -138,7 +138,7 @@ static void RecordDcmProperties ( DcmItem *ds, Ppyr &pyramid )
 		optical->findAndGetOFString( DCM_ObjectiveLensPower, objective ).good() &&
 		!objective.empty())
 	{
-		set_property( pyramid, "openslide.objective-power",
+		set_property( pyramid, "pyra.objective-power",
 			std::string( objective.c_str() ) );
 	}
 }

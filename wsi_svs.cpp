@@ -35,7 +35,7 @@ constexpr uint16_t kAperioJ2kRgb = 33005;
 //   Aperio Image Library ...<CRLF>46000x32914 [0,100 ...] (256x256) JPEG/RGB Q=30
 //   |AppMag = 20|MPP = 0.4990|ScanScope ID = ...|Filename = ...
 //
-// Kept verbatim beside the normalised readings: openslide.mpp-x says what we
+// Kept verbatim beside the normalised readings: pyra.mpp-x says what we
 // concluded, aperio.MPP says what Aperio wrote. Where they disagree, the raw one
 // is the evidence.
 static void RecordAperioDescription ( const char *desc, Ppyr &pyramid )
@@ -72,7 +72,7 @@ static void RecordAperioDescription ( const char *desc, Ppyr &pyramid )
 // other source in an SVS; mpp is cross-checked against Level::metric by the
 // property test rather than trusted blindly.
 	if (const auto *mag = find_property( pyramid, "aperio.AppMag" ))
-		set_property( pyramid, "openslide.objective-power", *mag );
+		set_property( pyramid, "pyra.objective-power", *mag );
 }
 
 

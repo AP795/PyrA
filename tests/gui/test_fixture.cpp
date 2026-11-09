@@ -13,7 +13,7 @@ namespace {
 constexpr auto kFixtureTileEdge = 64;
 }
 
-QString write_test_slide ( const QString &directory )
+QString write_test_wsi ( const QString &directory )
 {
 	if (!QDir().mkpath( directory ))
 		throw std::runtime_error( "Cannot create fixture output directory" );

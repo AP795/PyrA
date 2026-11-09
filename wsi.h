@@ -148,7 +148,7 @@ public:
 //
 // Last, so the level geometry and auxiliary images it reports are the final
 // ones - the coarse top-up above adds levels.
-			set_property( pyramid, "openslide.vendor", VendorName() );
+			set_property( pyramid, "pyra.vendor", VendorName() );
 			record_derived_properties( pyramid );
 		}
 		auto dt = std::chrono::duration<double, std::milli>(
@@ -161,7 +161,7 @@ public:
 
 	virtual void Close ( Ppyr &pyramid ) = 0;
 
-// Short name of the format this loader reads, for openslide.vendor.
+// Short name of the format this loader reads, for pyra.vendor.
 	virtual const char *VendorName () const = 0;
 
 // Load + Assemble: reads raw data from file into TileBf slot with header prepended.
@@ -177,11 +177,10 @@ public:
 
 // Samples the full requested metric rectangle; out-of-bounds pixels are zero.
 // Each destination axis spans that rectangle independently.
-	// When target_size is given (non-null, positive), the result is produced at
-	// exactly those pixel dimensions instead of Generate deriving them from the
-	// subrect. Zone population passes Slide::zone_raster_size so the zone's pixel
-	// size is computed in exactly one place and the base plane cannot diverge from
-	// the zone mask / results / display raster.
+// When target_size is given (non-null, positive), the result is produced at
+// exactly those pixel dimensions instead of Generate deriving them from the
+// subrect. Callers can supply a shared raster size to keep image, mask, results,
+// and display dimensions consistent.
 	template <typename pixeltype>
 	Pwhl<pixeltype> Generate ( Ppyr &pyramid,
 		Render<pixeltype> *render,

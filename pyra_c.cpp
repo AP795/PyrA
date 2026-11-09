@@ -70,21 +70,21 @@ pyra_status api_call ( pyra_error *error, F &&function ) noexcept
 }
 
 
-struct SlideState {
+struct WsiState {
 	priml::Ppyr pyramid_;
 	std::unique_ptr<priml::WsiLoader> loader_;
 	std::filesystem::path path_;
 	uint64_t last_use_ = 0;
 	bool opening_ = true;
 
-	~SlideState () {
+	~WsiState () {
 		if (loader_)
 			loader_->Close( pyramid_ );
 	}
 };
 
 
-size_t cache_bytes ( const SlideState &state, bool decoded )
+size_t cache_bytes ( const WsiState &state, bool decoded )
 {
 	auto bytes = size_t{ 0 };
 	for (const auto &level : state.pyramid_.levels)
@@ -96,7 +96,7 @@ size_t cache_bytes ( const SlideState &state, bool decoded )
 
 // Called only for another, idle slide under the owning context's mutex. Free
 // backing allocations rather than merely marking their slots reusable.
-size_t reclaim_cache ( SlideState &state, bool decoded )
+size_t reclaim_cache ( WsiState &state, bool decoded )
 {
 	const auto before = cache_bytes( state, decoded );
 	for (auto &level : state.pyramid_.levels) {
@@ -156,7 +156,7 @@ pyra_pixel_format public_format ( priml::LevelPixelType type )
 struct pyra_context {
 	pyra_context_options options_;
 	std::mutex mutex_;
-	std::vector<std::weak_ptr<SlideState>> slides_;
+	std::vector<std::weak_ptr<WsiState>> wsis_;
 	uint64_t handles_ = 0;
 	uint64_t clock_ = 0;
 	uint64_t evictions_ = 0;
@@ -165,20 +165,20 @@ struct pyra_context {
 
 	uint64_t allocated ( bool decoded ) const {
 		auto total = uint64_t{ 0 };
-		for (const auto &weak : slides_)
+		for (const auto &weak : wsis_)
 			if (const auto state = weak.lock())
 				total += cache_bytes( *state, decoded );
 		return total;
 	}
 
-	size_t growth_budget ( const SlideState *requester, bool decoded, size_t wanted ) {
+	size_t growth_budget ( const WsiState *requester, bool decoded, size_t wanted ) {
 		const auto cap = decoded ? options_.decoded_cache_bytes : options_.compressed_cache_bytes;
 		auto used = allocated( decoded );
 		auto available = used < cap ? cap - used : uint64_t{ 0 };
 		if (available >= wanted)
 			return wanted;
-		auto victims = std::vector<std::shared_ptr<SlideState>>{};
-		for (const auto &weak : slides_) {
+		auto victims = std::vector<std::shared_ptr<WsiState>>{};
+		for (const auto &weak : wsis_) {
 			if (auto state = weak.lock(); state && state.get() != requester && cache_bytes( *state, decoded ))
 				victims.push_back( std::move( state ) );
 		}
@@ -200,15 +200,15 @@ struct pyra_context {
 };
 
 
-struct pyra_slide {
+struct pyra_wsi {
 	pyra_context *context_ = nullptr;
-	std::shared_ptr<SlideState> state_;
+	std::shared_ptr<WsiState> state_;
 };
 
 
 namespace {
 
-const priml::PlaneStack &get_plane ( const SlideState &state, uint32_t index )
+const priml::PlaneStack &get_plane ( const WsiState &state, uint32_t index )
 {
 	require( index < state.pyramid_.planes.size(), "Plane index is out of range" );
 	return state.pyramid_.planes[index];
@@ -227,10 +227,10 @@ uint32_t output_span ( double extent, double mpp )
 }
 
 
-pyra_image_layout image_layout ( const pyra_slide &slide, const pyra_image_request *request )
+pyra_image_layout image_layout ( const pyra_wsi &wsi, const pyra_image_request *request )
 {
 	require( request && request->struct_size >= sizeof( *request ), "Invalid image request structure" );
-	const auto &plane = get_plane( *slide.state_, request->plane_index );
+	const auto &plane = get_plane( *wsi.state_, request->plane_index );
 	const auto &r = request->rectangle;
 	require( std::isfinite( request->mpp ) && request->mpp > 0 &&
 		std::isfinite( r.x_um ) && std::isfinite( r.y_um ) &&
@@ -254,7 +254,7 @@ pyra_image_layout image_layout ( const pyra_slide &slide, const pyra_image_reque
 	layout.width = output_span( r.width_um, request->mpp );
 	layout.height = output_span( r.height_um, request->mpp );
 	const auto pixels = uint64_t( layout.width ) * layout.height;
-	require( pixels <= slide.context_->options_.max_image_pixels && pixels <= uint64_t( std::numeric_limits<int>::max() ),
+	require( pixels <= wsi.context_->options_.max_image_pixels && pixels <= uint64_t( std::numeric_limits<int>::max() ),
 		"Requested image exceeds the context pixel limit", PYRA_LIMIT_EXCEEDED );
 	const auto bytes_per_pixel = priml::pixel_size_bytes( plane.pixel_type );
 	require( pixels <= std::numeric_limits<size_t>::max() / bytes_per_pixel,
@@ -265,23 +265,23 @@ pyra_image_layout image_layout ( const pyra_slide &slide, const pyra_image_reque
 }
 
 
-std::shared_ptr<SlideState> open_state ( pyra_context &context, const char *path )
+std::shared_ptr<WsiState> open_state ( pyra_context &context, const char *path )
 {
 	const auto source = pyr::path_from_utf8( path );
 	auto filesystem_error = std::error_code{};
 	const auto canonical = std::filesystem::canonical( source, filesystem_error );
 	require( !filesystem_error, "Unable to resolve slide path", PYRA_IO_ERROR );
-	std::erase_if( context.slides_, [] ( const auto &weak ) { return weak.expired(); } );
-	for (const auto &weak : context.slides_) {
+	std::erase_if( context.wsis_, [] ( const auto &weak ) { return weak.expired(); } );
+	for (const auto &weak : context.wsis_) {
 		if (auto state = weak.lock(); state && state->path_ == canonical) {
 			state->last_use_ = ++context.clock_;
 			return state;
 		}
 	}
-	auto state = std::make_shared<SlideState>();
+	auto state = std::make_shared<WsiState>();
 	state->path_ = canonical;
 	state->last_use_ = ++context.clock_;
-	context.slides_.push_back( state );
+	context.wsis_.push_back( state );
 	auto &pyramid = state->pyramid_;
 	pyramid.decode_threads = (int)context.options_.decode_threads;
 	pyramid.ram_cap_bytes = 0;
@@ -370,29 +370,29 @@ pyra_status pyra_context_destroy ( pyra_context *context, pyra_error *error )
 
 
 pyra_status pyra_open ( pyra_context *context, const char *path_utf8,
-	pyra_slide **slide, pyra_error *error )
+	pyra_wsi **wsi, pyra_error *error )
 {
-	if (slide)
-		*slide = nullptr;
+	if (wsi)
+		*wsi = nullptr;
 	return api_call( error, [&] {
-		require( context && slide && path_utf8 && *path_utf8, "Context, path, and slide output are required" );
+		require( context && wsi && path_utf8 && *path_utf8, "Context, path, and slide output are required" );
 		auto guard = std::scoped_lock( context->mutex_ );
-		auto owner = std::make_unique<pyra_slide>();
+		auto owner = std::make_unique<pyra_wsi>();
 		owner->context_ = context;
 		owner->state_ = open_state( *context, path_utf8 );
 		++context->handles_;
-		*slide = owner.release();
+		*wsi = owner.release();
 	} );
 }
 
 
-pyra_status pyra_close ( pyra_slide *slide, pyra_error *error )
+pyra_status pyra_close ( pyra_wsi *wsi, pyra_error *error )
 {
 	return api_call( error, [&] {
-		require( slide != nullptr, "Slide is null" );
-		auto guard = std::scoped_lock( slide->context_->mutex_ );
-		auto owner = std::unique_ptr<pyra_slide>( slide );
-		--slide->context_->handles_;
+		require( wsi != nullptr, "Slide is null" );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		auto owner = std::unique_ptr<pyra_wsi>( wsi );
+		--wsi->context_->handles_;
 	} );
 }
 
@@ -408,33 +408,33 @@ pyra_status pyra_context_get_stats ( pyra_context *context,
 		stats->compressed_cache_bytes = context->allocated( false );
 		stats->decoded_cache_bytes = context->allocated( true );
 		stats->cache_pool_evictions = context->evictions_;
-		stats->slide_handles = context->handles_;
+		stats->wsi_handles = context->handles_;
 		stats->render_calls = context->renders_;
 		stats->incomplete_renders = context->incomplete_;
-		for (const auto &weak : context->slides_)
-			stats->shared_slides += !weak.expired();
+		for (const auto &weak : context->wsis_)
+			stats->shared_wsis += !weak.expired();
 	} );
 }
 
 
-pyra_status pyra_get_plane_count ( pyra_slide *slide, uint32_t *count, pyra_error *error )
+pyra_status pyra_get_plane_count ( pyra_wsi *wsi, uint32_t *count, pyra_error *error )
 {
 	return api_call( error, [&] {
-		require( slide && count, "Slide and plane count output are required" );
-		auto guard = std::scoped_lock( slide->context_->mutex_ );
-		*count = (uint32_t)slide->state_->pyramid_.planes.size();
+		require( wsi && count, "Slide and plane count output are required" );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		*count = (uint32_t)wsi->state_->pyramid_.planes.size();
 	} );
 }
 
 
-pyra_status pyra_get_plane_info ( pyra_slide *slide, uint32_t plane_index,
+pyra_status pyra_get_plane_info ( pyra_wsi *wsi, uint32_t plane_index,
 	pyra_plane_info *info, pyra_error *error )
 {
 	return api_call( error, [&] {
-		require( slide && info && info->struct_size >= sizeof( *info ), "Invalid slide or plane information structure" );
-		auto guard = std::scoped_lock( slide->context_->mutex_ );
-		const auto &plane = get_plane( *slide->state_, plane_index );
-		const auto geometry = priml::native_geometry_for_plane( slide->state_->pyramid_, plane.plane );
+		require( wsi && info && info->struct_size >= sizeof( *info ), "Invalid slide or plane information structure" );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		const auto &plane = get_plane( *wsi->state_, plane_index );
+		const auto geometry = priml::native_geometry_for_plane( wsi->state_->pyramid_, plane.plane );
 		require( geometry && geometry->valid(), "Plane has no valid geometry", PYRA_UNSUPPORTED );
 		*info = {};
 		info->struct_size = sizeof( *info );
@@ -453,48 +453,48 @@ pyra_status pyra_get_plane_info ( pyra_slide *slide, uint32_t plane_index,
 }
 
 
-pyra_status pyra_get_property_count ( pyra_slide *slide, uint32_t *count, pyra_error *error )
+pyra_status pyra_get_property_count ( pyra_wsi *wsi, uint32_t *count, pyra_error *error )
 {
 	return api_call( error, [&] {
-		require( slide && count, "Slide and property count output are required" );
-		auto guard = std::scoped_lock( slide->context_->mutex_ );
-		*count = (uint32_t)slide->state_->pyramid_.properties.size();
+		require( wsi && count, "Slide and property count output are required" );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		*count = (uint32_t)wsi->state_->pyramid_.properties.size();
 	} );
 }
 
 
-pyra_status pyra_get_property ( pyra_slide *slide, uint32_t index,
+pyra_status pyra_get_property ( pyra_wsi *wsi, uint32_t index,
 	pyra_property *property, pyra_error *error )
 {
 	return api_call( error, [&] {
-		require( slide && property, "Slide and property output are required" );
-		auto guard = std::scoped_lock( slide->context_->mutex_ );
-		const auto &properties = slide->state_->pyramid_.properties;
+		require( wsi && property, "Slide and property output are required" );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		const auto &properties = wsi->state_->pyramid_.properties;
 		require( index < properties.size(), "Property index is out of range" );
 		*property = { properties[index].key.c_str(), properties[index].value.c_str() };
 	} );
 }
 
 
-pyra_status pyra_get_image_layout ( pyra_slide *slide, const pyra_image_request *request,
+pyra_status pyra_get_image_layout ( pyra_wsi *wsi, const pyra_image_request *request,
 	pyra_image_layout *layout, pyra_error *error )
 {
 	return api_call( error, [&] {
-		require( slide && layout && layout->struct_size >= sizeof( *layout ), "Invalid slide or image layout structure" );
-		auto guard = std::scoped_lock( slide->context_->mutex_ );
-		*layout = image_layout( *slide, request );
+		require( wsi && layout && layout->struct_size >= sizeof( *layout ), "Invalid slide or image layout structure" );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		*layout = image_layout( *wsi, request );
 	} );
 }
 
 
-pyra_status pyra_get_image ( pyra_slide *slide, const pyra_image_request *request,
+pyra_status pyra_get_image ( pyra_wsi *wsi, const pyra_image_request *request,
 	const pyra_image_buffer *destination, pyra_error *error )
 {
 	return api_call( error, [&] {
-		require( slide && destination && destination->struct_size >= sizeof( *destination ) &&
+		require( wsi && destination && destination->struct_size >= sizeof( *destination ) &&
 			destination->data, "Invalid slide or destination buffer" );
-		auto guard = std::scoped_lock( slide->context_->mutex_ );
-		const auto layout = image_layout( *slide, request );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		const auto layout = image_layout( *wsi, request );
 		require( destination->pixel_format == layout.pixel_format, "Destination format must match the plane format" );
 		require( destination->row_stride_bytes >= layout.row_stride_bytes, "Destination row stride is too small" );
 		const auto rows_before_last = size_t( layout.height - 1 );
@@ -503,9 +503,9 @@ pyra_status pyra_get_image ( pyra_slide *slide, const pyra_image_request *reques
 			"Destination stride calculation overflows size_t" );
 		require( destination->capacity_bytes >= rows_before_last * destination->row_stride_bytes + layout.row_stride_bytes,
 			"Destination buffer is too small", PYRA_BUFFER_TOO_SMALL );
-		auto &state = *slide->state_;
-		state.last_use_ = ++slide->context_->clock_;
-		++slide->context_->renders_;
+		auto &state = *wsi->state_;
+		state.last_use_ = ++wsi->context_->clock_;
+		++wsi->context_->renders_;
 		const auto &plane = get_plane( state, request->plane_index );
 		const auto before = state.pyramid_.stats.incomplete_renders;
 		state.pyramid_.unsupported_codec_->store( priml::ImgCodec::None );
@@ -540,7 +540,7 @@ pyra_status pyra_get_image ( pyra_slide *slide, const pyra_image_request *reques
 			}
 		} );
 		if (state.pyramid_.stats.incomplete_renders != before) {
-			++slide->context_->incomplete_;
+			++wsi->context_->incomplete_;
 			throw ApiFailure{ PYRA_INCOMPLETE, "Image contains missing tiles; available pixels were returned" };
 		}
 	} );

@@ -48,17 +48,17 @@ struct Context {
 };
 
 
-struct Slide {
-	pyra_slide *value_ = nullptr;
+struct Wsi {
+	pyra_wsi *value_ = nullptr;
 
-	Slide ( pyra_context *context, const std::filesystem::path &path ) {
+	Wsi ( pyra_context *context, const std::filesystem::path &path ) {
 		auto error = pyra_error{};
 		require( pyra_open( context, utf8( path ).c_str(), &value_, &error ) == PYRA_OK, error.message );
 	}
 
-	~Slide () { if (value_) pyra_close( value_, nullptr ); }
-	Slide ( const Slide & ) = delete;
-	Slide &operator= ( const Slide & ) = delete;
+	~Wsi () { if (value_) pyra_close( value_, nullptr ); }
+	Wsi ( const Wsi & ) = delete;
+	Wsi &operator= ( const Wsi & ) = delete;
 };
 
 
@@ -69,12 +69,12 @@ pyra_image_request request ( double x = 0, double y = 0, double width = kFixture
 }
 
 
-pyra_image_layout layout ( pyra_slide *slide, const pyra_image_request &image )
+pyra_image_layout layout ( pyra_wsi *wsi, const pyra_image_request &image )
 {
 	auto value = pyra_image_layout{};
 	value.struct_size = sizeof( value );
 	auto error = pyra_error{};
-	require( pyra_get_image_layout( slide, &image, &value, &error ) == PYRA_OK, error.message );
+	require( pyra_get_image_layout( wsi, &image, &value, &error ) == PYRA_OK, error.message );
 	return value;
 }
 
@@ -88,15 +88,15 @@ pyra_context_stats stats ( pyra_context *context )
 }
 
 
-void render_fixture ( pyra_slide *slide )
+void render_fixture ( pyra_wsi *wsi )
 {
 	const auto image = request();
-	const auto dimensions = layout( slide, image );
+	const auto dimensions = layout( wsi, image );
 	auto pixels = std::vector<uint8_t>( dimensions.capacity_bytes );
 	auto buffer = pyra_image_buffer{ sizeof( pyra_image_buffer ), dimensions.pixel_format,
 		pixels.data(), pixels.size(), dimensions.row_stride_bytes };
 	auto error = pyra_error{};
-	require( pyra_get_image( slide, &image, &buffer, &error ) == PYRA_OK, error.message );
+	require( pyra_get_image( wsi, &image, &buffer, &error ) == PYRA_OK, error.message );
 	for (auto pixel : pixels)
 		require( std::abs( int( pixel ) - kFixtureValue ) <= kTolerance, "Rendered fixture pixel differs" );
 }
@@ -105,10 +105,10 @@ void render_fixture ( pyra_slide *slide )
 void test_queries_and_ownership ( const std::filesystem::path &path )
 {
 	auto context = Context{};
-	auto first = Slide( context.value_, path );
-	auto second = Slide( context.value_, path.parent_path() / "." / path.filename() );
+	auto first = Wsi( context.value_, path );
+	auto second = Wsi( context.value_, path.parent_path() / "." / path.filename() );
 	const auto shared = stats( context.value_ );
-	require( shared.shared_slides == 1 && shared.slide_handles == 2, "Repeated opens did not share source storage" );
+	require( shared.shared_wsis == 1 && shared.wsi_handles == 2, "Repeated opens did not share source storage" );
 	require( pyra_context_destroy( context.value_, nullptr ) == PYRA_BUSY, "Context destruction ignored live slides" );
 	auto count = uint32_t{};
 	require( pyra_get_plane_count( first.value_, &count, nullptr ) == PYRA_OK && count == 1, "Plane count differs" );
@@ -121,25 +121,33 @@ void test_queries_and_ownership ( const std::filesystem::path &path )
 	auto property = pyra_property{};
 	require( pyra_get_property( first.value_, 0, &property, nullptr ) == PYRA_OK &&
 		property.key && property.value, "Missing metadata strings" );
+	auto expected_keys = std::vector<std::string>{ "pyra.vendor", "pyra.mpp-x",
+		"pyra.mpp-y", "pyra.level-count", "pyra.level[0].width" };
+	for (auto index = uint32_t{ 0 }; index < count; ++index) {
+		require( pyra_get_property( first.value_, index, &property, nullptr ) == PYRA_OK &&
+			property.key && property.value, "Missing metadata strings" );
+		std::erase( expected_keys, property.key );
+	}
+	require( expected_keys.empty(), "Missing normalized Pyra metadata keys" );
 	require( pyra_close( first.value_, nullptr ) == PYRA_OK, "Close failed" );
 	first.value_ = nullptr;
 	render_fixture( second.value_ );
-	require( stats( context.value_ ).slide_handles == 1, "Closing a shared handle removed another handle" );
+	require( stats( context.value_ ).wsi_handles == 1, "Closing a shared handle removed another handle" );
 }
 
 
 void test_layout_and_destination ( const std::filesystem::path &path )
 {
 	auto context = Context{};
-	auto slide = Slide( context.value_, path );
+	auto wsi = Wsi( context.value_, path );
 	const auto image = request( -2, -1, 8, 7 );
-	const auto dimensions = layout( slide.value_, image );
+	const auto dimensions = layout( wsi.value_, image );
 	require( dimensions.width == 8 && dimensions.height == 7, "Layout dimensions differ" );
 	const auto stride = dimensions.row_stride_bytes + kPadding;
 	auto pixels = std::vector<uint8_t>( stride * dimensions.height, kSentinel );
 	auto buffer = pyra_image_buffer{ sizeof( pyra_image_buffer ), dimensions.pixel_format,
 		pixels.data(), pixels.size(), stride };
-	require( pyra_get_image( slide.value_, &image, &buffer, nullptr ) == PYRA_OK, "Padded render failed" );
+	require( pyra_get_image( wsi.value_, &image, &buffer, nullptr ) == PYRA_OK, "Padded render failed" );
 	for (uint32_t y = 0; y < dimensions.height; ++y) {
 		for (uint32_t x = 0; x < dimensions.width; ++x) {
 			const auto pixel = pixels[y * stride + x];
@@ -151,29 +159,29 @@ void test_layout_and_destination ( const std::filesystem::path &path )
 	}
 	std::fill( pixels.begin(), pixels.end(), kSentinel );
 	buffer.capacity_bytes = 1;
-	require( pyra_get_image( slide.value_, &image, &buffer, nullptr ) == PYRA_BUFFER_TOO_SMALL,
+	require( pyra_get_image( wsi.value_, &image, &buffer, nullptr ) == PYRA_BUFFER_TOO_SMALL,
 		"Undersized destination was accepted" );
 	require( std::all_of( pixels.begin(), pixels.end(), [] ( auto p ) { return p == kSentinel; } ),
 		"Rejected call modified destination" );
 	buffer.capacity_bytes = pixels.size();
 	buffer.row_stride_bytes = SIZE_MAX;
-	require( pyra_get_image( slide.value_, &image, &buffer, nullptr ) == PYRA_INVALID_ARGUMENT,
+	require( pyra_get_image( wsi.value_, &image, &buffer, nullptr ) == PYRA_INVALID_ARGUMENT,
 		"Overflowing stride was accepted" );
 	buffer.row_stride_bytes = stride;
 	buffer.pixel_format = PYRA_PIXEL_RGB8;
-	require( pyra_get_image( slide.value_, &image, &buffer, nullptr ) == PYRA_INVALID_ARGUMENT,
+	require( pyra_get_image( wsi.value_, &image, &buffer, nullptr ) == PYRA_INVALID_ARGUMENT,
 		"Mismatched destination format was accepted" );
-	const auto fractional = layout( slide.value_, request( 0, 0, 32, 24, 0.75 ) );
+	const auto fractional = layout( wsi.value_, request( 0, 0, 32, 24, 0.75 ) );
 	require( fractional.width == 43 && fractional.height == 32, "Fractional resolution rounding differs" );
-	const auto snapped = layout( slide.value_, request( 0, 0, 12.8, 6.4, 0.1 ) );
+	const auto snapped = layout( wsi.value_, request( 0, 0, 12.8, 6.4, 0.1 ) );
 	require( snapped.width == 128 && snapped.height == 64, "Integer raster ratio did not snap" );
 	auto invalid = request();
 	invalid.mpp = std::numeric_limits<double>::quiet_NaN();
 	auto rejected = pyra_image_layout{ sizeof( pyra_image_layout ) };
-	require( pyra_get_image_layout( slide.value_, &invalid, &rejected, nullptr ) == PYRA_INVALID_ARGUMENT,
+	require( pyra_get_image_layout( wsi.value_, &invalid, &rejected, nullptr ) == PYRA_INVALID_ARGUMENT,
 		"Nonfinite mpp was accepted" );
 	invalid = request( 0, 0, 1e100, 1e100 );
-	require( pyra_get_image_layout( slide.value_, &invalid, &rejected, nullptr ) == PYRA_LIMIT_EXCEEDED,
+	require( pyra_get_image_layout( wsi.value_, &invalid, &rejected, nullptr ) == PYRA_LIMIT_EXCEEDED,
 		"Unrepresentable geometry was accepted" );
 }
 
@@ -184,17 +192,17 @@ void test_shared_cache_eviction ( const std::filesystem::path &path )
 	pyra_context_options_init( &options );
 	{
 		auto baseline = Context{};
-		auto slide = Slide( baseline.value_, path );
-		render_fixture( slide.value_ );
+		auto wsi = Wsi( baseline.value_, path );
+		render_fixture( wsi.value_ );
 		options.compressed_cache_bytes = stats( baseline.value_ ).compressed_cache_bytes;
 	}
 	require( options.compressed_cache_bytes > 0, "Fixture has no compressed cache allocation" );
 	options.decoded_cache_bytes = kFixtureEdge * kFixtureEdge;
 	auto context = Context( &options );
-	auto first = Slide( context.value_, path );
+	auto first = Wsi( context.value_, path );
 	const auto other_path = path.parent_path() / "second.ptf";
 	std::filesystem::copy_file( path, other_path, std::filesystem::copy_options::overwrite_existing );
-	auto second = Slide( context.value_, other_path );
+	auto second = Wsi( context.value_, other_path );
 	for (auto i = 0; i < 6; ++i) {
 		render_fixture( i % 2 ? second.value_ : first.value_ );
 		const auto current = stats( context.value_ );
@@ -229,22 +237,22 @@ void test_unsupported_compression ( const std::filesystem::path &directory )
 		if (!decoded)
 			options.decoded_cache_bytes = 0;
 		auto context = Context( &options );
-		auto slide = Slide( context.value_, directory / "unsupported.ptf" );
+		auto wsi = Wsi( context.value_, directory / "unsupported.ptf" );
 		const auto image = request();
-		const auto dimensions = layout( slide.value_, image );
+		const auto dimensions = layout( wsi.value_, image );
 		auto pixels = std::vector<uint8_t>( dimensions.capacity_bytes, kSentinel );
 		auto buffer = pyra_image_buffer{ sizeof( pyra_image_buffer ), dimensions.pixel_format,
 			pixels.data(), pixels.size(), dimensions.row_stride_bytes };
 		for (auto attempt = 0; attempt < 2; ++attempt) {
 			auto error = pyra_error{};
-			require( pyra_get_image( slide.value_, &image, &buffer, &error ) == PYRA_UNSUPPORTED,
+			require( pyra_get_image( wsi.value_, &image, &buffer, &error ) == PYRA_UNSUPPORTED,
 				"Unsupported compression was reported as a generic incomplete image" );
 			require( std::string( error.message ).find( "JPEG-LS" ) != std::string::npos,
 				"Unsupported-compression error omitted its codec" );
 			require( std::all_of( pixels.begin(), pixels.end(), [] ( auto value ) { return value == kSentinel; } ),
 				"Unsupported render modified the destination" );
 		}
-		auto supported = Slide( context.value_, directory / "standalone.ptf" );
+		auto supported = Wsi( context.value_, directory / "standalone.ptf" );
 		render_fixture( supported.value_ );
 	}
 }
@@ -258,16 +266,16 @@ void test_color_storage ( const std::filesystem::path &directory )
 		if (wide)
 			continue;
 #endif
-		auto slide = Slide( context.value_, directory / ( wide ? "rgb16.ptf" : "rgb8.ptf" ) );
+		auto wsi = Wsi( context.value_, directory / ( wide ? "rgb16.ptf" : "rgb8.ptf" ) );
 		const auto image = request();
-		const auto dimensions = layout( slide.value_, image );
+		const auto dimensions = layout( wsi.value_, image );
 		require( dimensions.pixel_format == ( wide ? PYRA_PIXEL_RGB16 : PYRA_PIXEL_RGB8 ),
 			"Native RGB storage format changed" );
 		auto pixels = std::vector<uint8_t>( dimensions.capacity_bytes + 1 );
 // Deliberately unaligned destination, supported by the byte-copy interface.
 		auto buffer = pyra_image_buffer{ sizeof( pyra_image_buffer ), dimensions.pixel_format,
 			pixels.data() + 1, pixels.size() - 1, dimensions.row_stride_bytes };
-		require( pyra_get_image( slide.value_, &image, &buffer, nullptr ) == PYRA_OK, "RGB render failed" );
+		require( pyra_get_image( wsi.value_, &image, &buffer, nullptr ) == PYRA_OK, "RGB render failed" );
 		const int expected8[] = { 37, 117, 220 };
 		const int expected16[] = { 511, 2048, 4095 };
 		for (size_t index = 0; index < kFixtureEdge * kFixtureEdge * 3; ++index) {
@@ -291,10 +299,10 @@ void test_disabled_cache_and_incomplete ( const std::filesystem::path &path )
 	options.decoded_cache_bytes = 0;
 	{
 		auto context = Context( &options );
-		auto slide = Slide( context.value_, path );
-		render_fixture( slide.value_ );
+		auto wsi = Wsi( context.value_, path );
+		render_fixture( wsi.value_ );
 		require( stats( context.value_ ).decoded_cache_bytes == 0, "Disabled decoded cache retained memory" );
-		auto coarse = Slide( context.value_, path.parent_path() / "coarse.ptf" );
+		auto coarse = Wsi( context.value_, path.parent_path() / "coarse.ptf" );
 		auto info = pyra_plane_info{ sizeof( pyra_plane_info ) };
 		require( pyra_get_plane_info( coarse.value_, 0, &info, nullptr ) == PYRA_OK && info.level_count > 1,
 			"Disabled decoded cache prevented synthetic overview construction" );
@@ -313,13 +321,13 @@ void test_disabled_cache_and_incomplete ( const std::filesystem::path &path )
 	}
 	options.compressed_cache_bytes = 1;
 	auto context = Context( &options );
-	auto slide = Slide( context.value_, path );
+	auto wsi = Wsi( context.value_, path );
 	const auto image = request();
-	const auto dimensions = layout( slide.value_, image );
+	const auto dimensions = layout( wsi.value_, image );
 	auto pixels = std::vector<uint8_t>( dimensions.capacity_bytes, kSentinel );
 	auto buffer = pyra_image_buffer{ sizeof( pyra_image_buffer ), dimensions.pixel_format,
 		pixels.data(), pixels.size(), dimensions.row_stride_bytes };
-	const auto status = pyra_get_image( slide.value_, &image, &buffer, nullptr );
+	const auto status = pyra_get_image( wsi.value_, &image, &buffer, nullptr );
 	require( status == PYRA_INCOMPLETE, "Missing tiles were not reported as incomplete" );
 	require( stats( context.value_ ).incomplete_renders == 1, "Incomplete result was not counted" );
 }

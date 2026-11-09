@@ -63,7 +63,7 @@ static double ElapsedMs ( const std::chrono::steady_clock::time_point &t0 ) {
 }
 
 template <typename pixeltype>
-static bool IsWholeSlideRequest ( const Rtlbr<float> &subrect,
+static bool IsWholeWsiRequest ( const Rtlbr<float> &subrect,
 	const Rtlbr<float> &mrct )
 {
 	constexpr float EPS = 0.5f;
@@ -111,7 +111,7 @@ static bool IsAllBlack ( const Pwhl<pixeltype> &pwhl ) {
 
 
 template <typename pixeltype>
-static bool IsSparseDarkWholeSlideFrame ( const Pwhl<pixeltype> &pwhl,
+static bool IsSparseDarkWholeWsiFrame ( const Pwhl<pixeltype> &pwhl,
 	int max_pixel_value = 0 ) {
 	if (!pwhl.p || pwhl.w <= 0 || pwhl.h <= 0)
 		return false;
@@ -191,7 +191,7 @@ static int SelectBestLevel ( const Ppyr &pyramid, const PlaneSel &sel,
 
 	for (auto i : stack->ladder) {
 		const auto &level = pyramid.levels[i];
-		if (level.reject_whole_slide_black && i != stack->ladder.front())
+		if (level.reject_whole_wsi_black && i != stack->ladder.front())
 			continue;
 		if (finest_available < 0)
 			finest_available = i;
@@ -997,7 +997,7 @@ Pwhl<pixeltype> WsiLoader::Generate (
 			"GENERATE-ENTRY: mpp=%f rect=[%f,%f]-[%f,%f] whole=%d render=%p levels=%d\n",
 			microns_per_pixel,
 			subrect.tl.x, subrect.tl.y, subrect.br.x, subrect.br.y,
-			IsWholeSlideRequest<pixeltype>( subrect, pyramid.mrct ) ? 1 : 0,
+			IsWholeWsiRequest<pixeltype>( subrect, pyramid.mrct ) ? 1 : 0,
 			static_cast<void *>( render ),
 			static_cast<int>( pyramid.levels.size() ) );
 		fflush( pyr::debug_file() );
@@ -1059,14 +1059,14 @@ template <typename pixeltype>
 static void LogGenerateSpanEntry ( const Render<pixeltype> &render,
 	float microns_per_pixel,
 	const Rtlbr<float> &subrect,
-	bool whole_slide_request )
+	bool whole_wsi_request )
 {
 	if (!pyr::debug_file())
 		return;
 	fprintf( pyr::debug_file(),
 		"GENERATE-SPAN-ENTRY: mpp=%f rect=[%f,%f]-[%f,%f] whole=%d render_image=%dx%d bound=%p\n",
 		microns_per_pixel, subrect.tl.x, subrect.tl.y,
-		subrect.br.x, subrect.br.y, whole_slide_request ? 1 : 0,
+		subrect.br.x, subrect.br.y, whole_wsi_request ? 1 : 0,
 		render.image.w, render.image.h, static_cast<void *>( render.pyr ) );
 	fflush( pyr::debug_file() );
 }
@@ -1220,9 +1220,9 @@ Pwhl<pixeltype> WsiLoader::GenerateSpan (
 {
 	auto render_t0 = std::chrono::steady_clock::now();
 	pyramid.stats.renders++;
-	const auto whole_slide_request = IsWholeSlideRequest<pixeltype>( subrect, pyramid.mrct );
+	const auto whole_wsi_request = IsWholeWsiRequest<pixeltype>( subrect, pyramid.mrct );
 	LogGenerateSpanEntry(
-		render, microns_per_pixel, subrect, whole_slide_request );
+		render, microns_per_pixel, subrect, whole_wsi_request );
 	auto *active_render = &render;
 	active_render->bind( &pyramid );
 	active_render->plane = sel;
@@ -1326,11 +1326,11 @@ Pwhl<pixeltype> WsiLoader::GenerateSpan (
 			}
 		}
 
-		if (whole_slide_request && !is_finest &&
+		if (whole_wsi_request && !is_finest &&
 			( IsAllBlack( active_render->image ) ||
-			  IsSparseDarkWholeSlideFrame(
+			  IsSparseDarkWholeWsiFrame(
 				  active_render->image, level.max_pixel_value ) )) {
-			level.reject_whole_slide_black = true;
+			level.reject_whole_wsi_black = true;
 			active_render->clear();
 			if (pyr::debug_file()) {
 				fprintf( pyr::debug_file(), "GEN: rejecting whole-slide sparse/dark level %d (metric=%f)\n",
@@ -1344,14 +1344,14 @@ Pwhl<pixeltype> WsiLoader::GenerateSpan (
 			{px_l - active_render->lr.tl.x, px_t - active_render->lr.tl.y},
 			{px_r - active_render->lr.tl.x, px_b - active_render->lr.tl.y}
 		} );
-		if (!whole_slide_request || is_finest ||
+		if (!whole_wsi_request || is_finest ||
 			( !IsAllBlack( span ) &&
-			  !IsSparseDarkWholeSlideFrame( span, level.max_pixel_value ) )) {
+			  !IsSparseDarkWholeWsiFrame( span, level.max_pixel_value ) )) {
 			pyramid.stats.render_ms += ElapsedMs( render_t0 );
 			return span;
 		}
 
-		level.reject_whole_slide_black = true;
+		level.reject_whole_wsi_black = true;
 		active_render->clear();
 		if (pyr::debug_file()) {
 			fprintf( pyr::debug_file(), "GEN: rejecting whole-slide sparse/dark level %d (metric=%f)\n",

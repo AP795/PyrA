@@ -15,10 +15,10 @@ can instead deploy the compatible codec runtime using its loader configuration.
 
 ## Ownership and threads
 
-Create a `pyra_context`, open `pyra_slide` handles in it, close each handle,
+Create a `pyra_context`, open `pyra_wsi` handles in it, close each handle,
 then destroy the context. Destroying a context with live handles returns
 `PYRA_BUSY` and leaves it usable. Returned channel and property strings are
-UTF-8, immutable, borrowed pointers valid until their slide handle closes.
+UTF-8, immutable, borrowed pointers valid until their WSI handle closes.
 Paths supplied to `pyra_open` are UTF-8. Source files must not change while
 open; reopening a modified source requires closing all handles first.
 
@@ -60,6 +60,10 @@ indices are local to an open slide. Information includes channel, Z in
 micrometres, native bounds and rendering mpp, level count, pixel format, and
 sample range. Resolution levels include synthetic coarse levels, when built.
 Metadata is available through property count and indexed property queries.
+Normalized metadata uses the `pyra.` namespace, including `pyra.vendor`,
+`pyra.mpp-x`, `pyra.mpp-y`, `pyra.objective-power`, `pyra.level-count`,
+`pyra.level[i].*`, `pyra.associated[name].*`, and `pyra.icc-size` when available.
+Raw metadata retains its format-specific namespace, such as `tiff.` or `aperio.`.
 
 An image request specifies the plane index, rectangle `(x, y, width, height)`
 in micrometres, and positive mpp. Rectangle edges are half-open. Output width
@@ -140,7 +144,7 @@ budgets divided by the application.
 int read_region ( const char *path )
 {
 	pyra_context *context = NULL;
-	pyra_slide *slide = NULL;
+	pyra_wsi *wsi = NULL;
 	pyra_error error;
 	pyra_image_request request = { 0 };
 	pyra_image_layout layout = { 0 };
@@ -148,26 +152,26 @@ int read_region ( const char *path )
 	int result = 1;
 	if (pyra_context_create( NULL, &context, &error ) != PYRA_OK)
 		return result;
-	if (pyra_open( context, path, &slide, &error ) != PYRA_OK)
+	if (pyra_open( context, path, &wsi, &error ) != PYRA_OK)
 		goto cleanup;
 	request.struct_size = sizeof( request );
 	request.plane_index = 0;
 	request.rectangle = (pyra_rect){ 0, 0, 256, 256 };
 	request.mpp = 1;
 	layout.struct_size = sizeof( layout );
-	if (pyra_get_image_layout( slide, &request, &layout, &error ) != PYRA_OK)
+	if (pyra_get_image_layout( wsi, &request, &layout, &error ) != PYRA_OK)
 		goto cleanup;
 	buffer.struct_size = sizeof( buffer );
 	buffer.pixel_format = layout.pixel_format;
 	buffer.data = malloc( layout.capacity_bytes );
 	buffer.capacity_bytes = layout.capacity_bytes;
 	buffer.row_stride_bytes = layout.row_stride_bytes;
-	if (buffer.data && pyra_get_image( slide, &request, &buffer, &error ) == PYRA_OK)
+	if (buffer.data && pyra_get_image( wsi, &request, &buffer, &error ) == PYRA_OK)
 		result = 0; /* Consume the pixels here. */
 	free( buffer.data );
 cleanup:
-	if (slide)
-		pyra_close( slide, NULL );
+	if (wsi)
+		pyra_close( wsi, NULL );
 	pyra_context_destroy( context, NULL );
 	return result;
 }

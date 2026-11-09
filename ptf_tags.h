@@ -55,7 +55,7 @@ struct PtfPlaneTags {
 //
 // The raw acquisition mode string the channel name was derived from ("RED10").
 // Kept beside the conclusion as evidence, the same way pyr keeps "aperio.MPP"
-// beside "openslide.mpp-x". Never parsed back into a decision.
+// beside "pyra.mpp-x". Never parsed back into a decision.
 	std::string mode;
 //
 // For a channel that was co-registered onto the reference channel at conversion

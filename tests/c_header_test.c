@@ -16,7 +16,7 @@ int main ( void )
 	}
 	stats.struct_size = sizeof( stats );
 	if (pyra_context_get_stats( context, &stats, &error ) != PYRA_OK ||
-		stats.slide_handles != 0 || stats.shared_slides != 0)
+		stats.wsi_handles != 0 || stats.shared_wsis != 0)
 		return 2;
 	return pyra_context_destroy( context, &error ) == PYRA_OK ? 0 : 3;
 }

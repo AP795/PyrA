@@ -35,7 +35,7 @@ bool LoadStandardIFD ( TIFF *tif, Pwhl<pixeltype> &out );
 
 // Record the baseline TIFF tags of the CURRENT directory as `tiff.*` properties.
 //
-// The raw tag beside the normalised reading: openslide.mpp-x says what we
+// The raw tag beside the normalised reading: pyra.mpp-x says what we
 // concluded, tiff.XResolution says what the file actually held. Call it on the
 // base IFD once the pyramid is otherwise built.
 void ReadTiffProperties ( TIFF *tif, Ppyr &pyramid );

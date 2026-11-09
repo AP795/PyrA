@@ -36,7 +36,7 @@ if(BUILD_TESTING)
 	add_dependencies(pyra_evaluator_test pyra_fixture_writer)
 	add_test(NAME pyra_evaluator COMMAND pyra_evaluator_test
 		"${CMAKE_CURRENT_BINARY_DIR}/test_out/evaluator" "${CMAKE_BINARY_DIR}/test_out")
-	set_tests_properties(pyra_evaluator PROPERTIES FIXTURES_REQUIRED pyra_slide_fixture)
+	set_tests_properties(pyra_evaluator PROPERTIES FIXTURES_REQUIRED pyra_wsi_fixture)
 	add_test(NAME pyra_gui_smoke COMMAND pyra_gui_test --smoke-test
 		"${CMAKE_CURRENT_BINARY_DIR}/test_out/gui")
 	set_tests_properties(pyra_gui_smoke PROPERTIES
@@ -47,7 +47,7 @@ if(BUILD_TESTING)
 	target_link_libraries(pyra_viewer_behavior_test PRIVATE pyra_gui_support Qt6::Widgets)
 	add_dependencies(pyra_viewer_behavior_test pyra_fixture_writer)
 	add_test(NAME pyra_viewer_behavior COMMAND pyra_viewer_behavior_test "${CMAKE_BINARY_DIR}/test_out")
-	set_tests_properties(pyra_viewer_behavior PROPERTIES FIXTURES_REQUIRED pyra_slide_fixture
+	set_tests_properties(pyra_viewer_behavior PROPERTIES FIXTURES_REQUIRED pyra_wsi_fixture
 		ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 40)
 endif()
 

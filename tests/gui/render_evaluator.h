@@ -110,7 +110,7 @@ private:
 	RenderResult render_frame ( const RenderRequest &request, bool display, RenderPurpose purpose );
 
 	pyra_context *context_ = nullptr;
-	pyra_slide *slide_ = nullptr;
+	pyra_wsi *wsi_ = nullptr;
 	std::vector<PlaneInfo> planes_;
 	std::vector<RenderRequest> recorded_;
 	bool recording_ = false;
