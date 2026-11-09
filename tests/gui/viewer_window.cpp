@@ -1,6 +1,7 @@
 #include "viewer_window.h"
 
 #include "minimap.h"
+#include "open_wsi_dialog.h"
 #include "test_fixture.h"
 #include "viewport.h"
 
@@ -9,15 +10,17 @@
 #include <QComboBox>
 #include <QDir>
 #include <QDockWidget>
-#include <QFileDialog>
 #include <QFileInfo>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QTextCursor>
 #include <QToolBar>
+#include <QToolButton>
 
 #include <algorithm>
 #include <cmath>
@@ -37,8 +40,23 @@ ViewerWindow::ViewerWindow ( const QString &image_directory )
 	setCentralWidget( viewport_ );
 	auto *toolbar = addToolBar( tr( "Viewer and performance" ) );
 	toolbar->setMovable( false );
-	open_ = toolbar->addAction( tr( "Open" ) );
+	open_ = toolbar->addAction( tr( "Open WSI" ) );
 	open_->setShortcut( QKeySequence::Open );
+	auto *open_menu = new QMenu( this );
+	for (const auto backend : { PYRA_BACKEND_NATIVE, PYRA_BACKEND_OPENSLIDE }) {
+		auto info = pyra_backend_info{ sizeof( pyra_backend_info ), 0, nullptr, nullptr };
+		pyra_get_backend_info( backend, &info, nullptr );
+		auto *action = open_menu->addAction( tr( "%1…" ).arg( QString::fromUtf8( info.name ) ) );
+		action->setEnabled( info.available != 0 );
+		action->setToolTip( info.available ? QString::fromUtf8( info.version ) :
+			tr( "Requires PYRA_WITH_OPENSLIDE=ON" ) );
+		connect( action, &QAction::triggered, this, [this, backend] { open_dialog( backend ); } );
+	}
+	open_->setMenu( open_menu );
+	if (auto *button = qobject_cast<QToolButton *>( toolbar->widgetForAction( open_ ) )) {
+		button->setPopupMode( QToolButton::MenuButtonPopup );
+		button->setAccessibleName( tr( "Open WSI and choose reader backend" ) );
+	}
 	fit_ = toolbar->addAction( tr( "Fit" ) );
 	native_ = toolbar->addAction( tr( "1:1" ) );
 	toolbar->addSeparator();
@@ -56,6 +74,8 @@ ViewerWindow::ViewerWindow ( const QString &image_directory )
 	replay_->setToolTip( tr( "Replay exact recorded requests, preserving existing cache state" ) );
 	auto *dock = new QDockWidget( tr( "Inspector / performance" ), this );
 	auto *splitter = new QSplitter( Qt::Vertical, dock );
+	inspector_ = dock;
+	inspector_splitter_ = splitter;
 	minimap_ = new Minimap( splitter );
 	metadata_ = new QPlainTextEdit( splitter );
 	report_ = new QPlainTextEdit( splitter );
@@ -64,7 +84,8 @@ ViewerWindow::ViewerWindow ( const QString &image_directory )
 	metadata_->setAccessibleName( tr( "Slide metadata" ) );
 	report_->setAccessibleName( tr( "Performance report" ) );
 	report_->setPlainText( tr( "Record → navigate → Stop → Replay\n\n"
-		"Recordings stay in memory and are cleared when another slide is opened.\n"
+		"Choose PyrA native or OpenSlide in Open WSI. Reopen the same WSI with the other reader "
+		"to replay the same recording. Opening a different WSI clears it.\n"
 		"Replay retains current caches and excludes painting from render timing." ) );
 	splitter->setSizes( { fontMetrics().lineSpacing() * 10,
 		fontMetrics().lineSpacing() * 11, fontMetrics().lineSpacing() * 14 } );
@@ -91,12 +112,7 @@ ViewerWindow::ViewerWindow ( const QString &image_directory )
 			debounce_.start();
 	} );
 	connect( minimap_, &Minimap::center_requested, viewport_, &Viewport::center_on );
-	connect( open_, &QAction::triggered, this, [this] {
-		const auto path = QFileDialog::getOpenFileName( this, tr( "Open slide" ), image_directory_,
-			tr( "Whole-slide images (*.svs *.ndpi *.bif *.ptf *.glr *.dcm *.czi);;All files (*)" ) );
-		if (!path.isEmpty())
-			open( path );
-	} );
+	connect( open_, &QAction::triggered, this, [this] { open_dialog( reader_options_.backend ); } );
 	connect( fit_, &QAction::triggered, viewport_, &Viewport::fit );
 	connect( native_, &QAction::triggered, viewport_, &Viewport::native_size );
 	connect( planes_, &QComboBox::currentIndexChanged, this, &ViewerWindow::select_plane );
@@ -135,7 +151,7 @@ void ViewerWindow::update_controls ()
 	record_->setEnabled( ready && !recording_ );
 	stop_->setEnabled( recording_ || replaying_ );
 	replay_->setEnabled( ready && !recording_ && recorded_count_ > 0 );
-	busy_->setVisible( opening_ || overview_loading_ || rendering_ || replaying_ || stopping_ );
+	busy_->setVisible( !replaying_ && ( opening_ || overview_loading_ || rendering_ || stopping_ ) );
 }
 
 
@@ -172,7 +188,7 @@ void ViewerWindow::select_plane ( int index )
 			minimap_->set_overview( overview.image, overview.error );
 			if (!overview.error.isEmpty()) {
 				metadata_->appendPlainText( tr( "Minimap: %1" ).arg( overview.error ) );
-				report_->setPlainText( overview.error );
+				report_->appendPlainText( overview.error );
 				statusBar()->showMessage( overview.error );
 			}
 			update_controls();
@@ -181,7 +197,25 @@ void ViewerWindow::select_plane ( int index )
 }
 
 
-void ViewerWindow::open ( const QString &path )
+void ViewerWindow::open_dialog ( pyra_backend backend )
+{
+	auto options = reader_options_;
+	options.backend = backend;
+	auto dialog = OpenWsiDialog( image_directory_, last_loaded_image_, options, this );
+	if (dialog.exec() == QDialog::Accepted)
+		open( dialog.path(), dialog.options() );
+}
+
+
+void ViewerWindow::open ( const QString &path, pyra_backend backend )
+{
+	auto options = reader_options_;
+	options.backend = backend;
+	open( path, options );
+}
+
+
+void ViewerWindow::open ( const QString &path, const pyra_context_options &options )
 {
 	if (opening_ || recording_ || replaying_ || stopping_)
 		return;
@@ -195,34 +229,37 @@ void ViewerWindow::open ( const QString &path )
 	debounce_.stop();
 	const auto generation = ++generation_;
 	overview_generation_.store( generation, std::memory_order_relaxed );
-	recorded_count_ = 0;
-	plane_info_.clear();
-	viewport_->set_plane( {}, 1.0 );
-	minimap_->set_plane( {} );
 	statusBar()->showMessage( tr( "Opening %1…" ).arg( path ) );
 	update_controls();
-	QMetaObject::invokeMethod( worker_, [this, path, generation] {
-		auto info = evaluator_->open( path );
-		QMetaObject::invokeMethod( this, [this, info = std::move( info ), generation, path] {
+	QMetaObject::invokeMethod( worker_, [this, path, generation, options] {
+		auto info = evaluator_->open( path, options );
+		QMetaObject::invokeMethod( this, [this, info = std::move( info ), generation, path, options] {
 			if (generation != generation_)
 				return;
 			opening_ = false;
-			metadata_->setPlainText( info.metadata );
-			{
-				const auto blocker = QSignalBlocker( planes_ );
-				planes_->clear();
-				for (const auto &plane : info.planes)
-					planes_->addItem( plane.label );
-			}
 			if (!info.error.isEmpty()) {
 				statusBar()->showMessage( info.error );
-				report_->setPlainText( info.error );
+				report_->appendPlainText( info.error );
 				if (smoke_step_ >= 0)
 					smoke_finish( 1 );
 			} else {
+				metadata_->setPlainText( info.metadata );
+				{
+					const auto blocker = QSignalBlocker( planes_ );
+					planes_->clear();
+					for (const auto &plane : info.planes)
+						planes_->addItem( plane.label );
+				}
+				reader_options_ = options;
+				recorded_count_ = info.recorded;
+				const auto message = tr( "Opened with %1 in %2 ms. %3 recorded requests retained." )
+					.arg( info.backend ).arg( info.open_ms, 0, 'f', 3 ).arg( qulonglong( info.recorded ) );
+				if (!info.recording_preserved)
+					report_->clear();
+				report_->appendPlainText( message );
 				last_loaded_image_ = QFileInfo( path ).absoluteFilePath();
 				plane_info_ = info.planes;
-				setWindowTitle( tr( "Pyra — %1" ).arg( path ) );
+				setWindowTitle( tr( "Pyra — %1 — %2" ).arg( info.backend, path ) );
 				select_plane( planes_->currentIndex() );
 			}
 			update_controls();
@@ -300,7 +337,7 @@ void ViewerWindow::dispatch_render ()
 					.arg( qulonglong( count ) ).arg( recording_ ? tr( " — RECORDING" ) : QString{} )
 					.arg( frame.incomplete ? tr( " — INCOMPLETE" ) : QString{} ) );
 				if (!frame.error.isEmpty()) {
-					report_->setPlainText( frame.error );
+					report_->appendPlainText( frame.error );
 					statusBar()->showMessage( frame.error );
 					displayed_request_.reset();
 				}
@@ -353,7 +390,7 @@ void ViewerWindow::stop ()
 		QMetaObject::invokeMethod( this, [this, count] {
 			recorded_count_ = count;
 			stopping_ = false;
-			report_->setPlainText( tr( "Stopped: %1 render requests recorded in memory.\n"
+				report_->setPlainText( tr( "Stopped: %1 render requests recorded in memory.\n"
 				"Replay repeats them in order with their original sizes and planes.\n"
 				"Existing caches are retained; this is not a cold-cache benchmark." )
 				.arg( qulonglong( count ) ) );
@@ -378,7 +415,7 @@ void ViewerWindow::replay ()
 		auto report = evaluator_->replay();
 		QMetaObject::invokeMethod( this, [this, report = std::move( report )] {
 			replaying_ = false;
-			report_->setPlainText( report.text() );
+			show_replay_report( report.text() );
 			statusBar()->showMessage( tr( "Replay finished: %1 calls, %2 ms total Pyra render time." )
 				.arg( qulonglong( report.timing.count ) ).arg( report.timing.total_ms, 0, 'f', 3 ) );
 			update_controls();
@@ -391,6 +428,24 @@ void ViewerWindow::replay ()
 			}
 		} );
 	} );
+}
+
+
+void ViewerWindow::show_replay_report ( const QString &text )
+{
+	report_->appendPlainText( QStringLiteral( "\n" ) + text );
+	inspector_->show();
+	inspector_->raise();
+	const auto sizes = inspector_splitter_->sizes();
+	const auto minimum_report_height = fontMetrics().lineSpacing() * 12;
+	if (sizes.size() == 3 && sizes[2] < minimum_report_height) {
+		const auto height = inspector_splitter_->height();
+		inspector_splitter_->setSizes( { height / 4, height / 4, height / 2 } );
+	}
+	auto cursor = report_->textCursor();
+	cursor.setPosition( std::max( 0, int( report_->toPlainText().lastIndexOf( QStringLiteral( "Total:" ) ) ) ) );
+	report_->setTextCursor( cursor );
+	report_->centerCursor();
 }
 
 

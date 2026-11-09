@@ -12,8 +12,10 @@
 
 class QAction;
 class QComboBox;
+class QDockWidget;
 class QPlainTextEdit;
 class QProgressBar;
+class QSplitter;
 
 namespace pyra::test {
 
@@ -24,19 +26,22 @@ class ViewerWindow : public QMainWindow {
 public:
 	explicit ViewerWindow ( const QString &image_directory = {} );
 	~ViewerWindow () override;
-	void open ( const QString &path );
+	void open ( const QString &path, pyra_backend backend = PYRA_BACKEND_NATIVE );
+	void open ( const QString &path, const pyra_context_options &options );
 	void smoke_test ( const QString &output_directory );
 	void report_message ( const QString &message );
 	const QString &last_loaded_image () const { return last_loaded_image_; }
 
 private:
 	void select_plane ( int index );
+	void open_dialog ( pyra_backend backend );
 	void schedule_render ();
 	void dispatch_render ();
 	void update_controls ();
 	void record ();
 	void stop ();
 	void replay ();
+	void show_replay_report ( const QString &text );
 	void smoke_frame ();
 	bool smoke_minimap ( bool drag );
 	void smoke_finish ( int code );
@@ -46,6 +51,8 @@ private:
 	QComboBox *planes_ = nullptr;
 	QPlainTextEdit *metadata_ = nullptr;
 	QPlainTextEdit *report_ = nullptr;
+	QDockWidget *inspector_ = nullptr;
+	QSplitter *inspector_splitter_ = nullptr;
 	QProgressBar *busy_ = nullptr;
 	QAction *open_ = nullptr;
 	QAction *fit_ = nullptr;
@@ -75,6 +82,7 @@ private:
 	QString smoke_output_;
 	QString image_directory_;
 	QString last_loaded_image_;
+	pyra_context_options reader_options_ = reader_options();
 	int smoke_step_ = -1;
 };
 

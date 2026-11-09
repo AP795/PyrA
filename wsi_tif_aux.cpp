@@ -57,6 +57,18 @@ bool BuildTiffTileTable ( TIFF *tif, Level &level,
 		return false;
 	level.tile_w = (int)tile_dimensions.w;
 	level.tile_h = (int)tile_dimensions.h;
+	auto compression = uint16_t{};
+	if (TIFFGetFieldDefaulted( tif, TIFFTAG_COMPRESSION, &compression ) && compression == COMPRESSION_JPEG) {
+		auto photometric = uint16_t{};
+		if (TIFFGetField( tif, TIFFTAG_PHOTOMETRIC, &photometric )) {
+// JPEG component IDs alone can be ambiguous. The TIFF declaration governs
+// whether the encoded components are RGB or YCbCr for these tiled sources.
+			if (photometric == PHOTOMETRIC_RGB)
+				level.color_hint = ColorHint::Rgb;
+			else if (photometric == PHOTOMETRIC_YCBCR)
+				level.color_hint = ColorHint::YCbCr;
+		}
+	}
 	level.tiles.reserve( (size_t)nx * ny );
 	for (uint32_t y = 0; y < ny; ++y) {
 		for (uint32_t x = 0; x < nx; ++x) {

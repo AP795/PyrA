@@ -41,6 +41,7 @@ Use `CMAKE_PREFIX_PATH` or CMake's `TIFF_INCLUDE_DIR`, `TIFF_LIBRARY`,
 | `PYR_WITH_JXL` | OFF | libjxl >= 0.9, discoverable through pkg-config |
 | `PYR_WITH_DCMTK` | OFF | DCMTK |
 | `PYR_WITH_CZI` | OFF | libCZI, linked dynamically |
+| `PYRA_WITH_OPENSLIDE` | OFF | OpenSlide >= 4.0.1, linked dynamically |
 | `BUILD_TESTING` | ON | None; tests generate their own small images |
 | `PYRA_BUILD_GUI_TEST` | OFF | Qt 6 Widgets; viewer and performance evaluator |
 | `PYRA_ENABLE_IPO` | ON | Compiler/linker support for Release IPO/LTO |
@@ -72,6 +73,45 @@ requirement; the viewer shows that error rather than treating it as a cache issu
 
 libCZI must use a compatible C++ runtime and remain dynamically linked.
 Third-party libraries retain their own licenses and distribution requirements.
+
+### Optional OpenSlide backend
+
+The C API can select **PyrA native** or **OpenSlide** per context. Native remains
+the default. The existing GUI's **Open WSI** menu offers the same choice; reopen
+the same slide with the other reader to reuse its Record / Stop / Replay workload.
+See [comparison and cache semantics](docs/c-api.md#reader-backends).
+
+On Windows, fetch the pinned official GitHub binary build 4.0.1.2 (OpenSlide
+4.0.1) and its matching complete sources into the build tree. The script checks
+both SHA-256 hashes; normal configuration does not access the network.
+
+```powershell
+cmake -DPYRA_OPENSLIDE_DEST=C:/tmp/bld/Pyra/deps -P cmake/FetchOpenSlide.cmake
+cmake -S . -B C:/tmp/bld/Pyra -DPYRA_WITH_OPENSLIDE=ON `
+  -DPYRA_OPENSLIDE_ROOT=C:/tmp/bld/Pyra/deps/openslide-bin-4.0.1.2-windows-x64
+cmake --build C:/tmp/bld/Pyra --config Release --parallel 1
+ctest --test-dir C:/tmp/bld/Pyra -C Release --output-on-failure
+```
+
+Use CMake from Visual Studio 2026 for its VS 18 generator; an older CMake on
+PATH may not support it. These commands extend the existing configured tree;
+a fresh tree also needs the native codec SDK inputs described above.
+
+On Linux, install OpenSlide >= 4.0.1 and its development files from
+[upstream's packages or source](https://openslide.org/download/), then extend the
+normal Release configuration with `-DPYRA_WITH_OPENSLIDE=ON`. Discovery uses
+`pkg-config openslide`; set `PKG_CONFIG_PATH` for a custom prefix. The system
+OpenSlide version may be older than required. For an official binary SDK without
+a pkg-config file, set `PYRA_OPENSLIDE_ROOT` to its extracted prefix instead.
+Keep the libjpeg-turbo 3 inputs
+from the [Linux setup](tests/gui/README.md#ubuntu-2404--wsl-setup).
+
+OpenSlide is LGPL-2.1 and remains a separate shared library. The Windows fetch
+includes upstream component notices and complete corresponding sources. Installation
+copies the DLL, notices and matching source archive when using that SDK layout;
+custom SDK distributors must provide the corresponding notices and sources.
+The Linux package's runtime dependencies remain the distributor's responsibility.
+See [upstream's redistribution notes](https://openslide.org/docs/windows/#licensing).
 
 ### Visual Studio folder mode
 

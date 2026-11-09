@@ -1,5 +1,7 @@
 #include "render_evaluator.h"
 
+#include <QFileInfo>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -133,14 +135,25 @@ TimingStats summarize_timings ( std::vector<double> milliseconds )
 
 QString ReplayReport::text () const
 {
-	return QStringLiteral(
+	const auto limits = options.backend == PYRA_BACKEND_NATIVE
+		? QStringLiteral( "TBF cache: %1 MiB; PBF cache: %2 MiB; decoder threads: %3\n" )
+			.arg( double( options.compressed_cache_bytes ) / kBytesPerMiB )
+			.arg( double( options.decoded_cache_bytes ) / kBytesPerMiB ).arg( options.decode_threads )
+		: QStringLiteral( "PBF cache: %1 MiB; TBF and decoder-thread control unavailable in OpenSlide.\n" )
+			.arg( double( options.decoded_cache_bytes ) / kBytesPerMiB );
+	return QStringLiteral( "Backend: %1\nOpen: %2 ms\n" )
+		.arg( backend ).arg( open_ms, 0, 'f', 3 ) + limits + QStringLiteral(
 		"Replay: existing slide/cache state retained\n"
 		"Recorded: %1   Attempted: %2\nFailed: %3   Incomplete: %4\n"
-		"Cancelled: %5\n\nPyra render calls (all attempts):\n"
+		"Cancelled: %5\n\nC API render calls (all attempts):\n"
 		"Total: %6 ms\nMean: %7 ms\nMedian: %8 ms\nP95: %9 ms\n"
 		"Min / max: %10 / %11 ms\nThroughput: %12 renders/s\n\n"
 		"Replay wall time: %13 ms\n"
-		"C API timing includes the output copy; excludes Qt conversion and painting.\n%14" )
+		"C API timing includes backend decoding, sampling, pixel conversion and output copy; "
+		"excludes Qt conversion and painting.\n"
+		"Cache limits apply per context; one C API call at a time.\n"
+		"Opening and the GUI overview/view can warm caches. Reopening resets the library context, "
+		"not the OS file cache.\n%14" )
 		.arg( qulonglong( recorded ) ).arg( qulonglong( timing.count ) )
 		.arg( qulonglong( failed ) ).arg( qulonglong( incomplete ) )
 		.arg( cancelled ? QStringLiteral( "yes" ) : QStringLiteral( "no" ) )
@@ -151,11 +164,22 @@ QString ReplayReport::text () const
 }
 
 
-RenderEvaluator::RenderEvaluator ()
+RenderEvaluator::RenderEvaluator ( pyra_backend backend )
+	: RenderEvaluator( reader_options( backend ) )
+{
+}
+
+
+RenderEvaluator::RenderEvaluator ( const pyra_context_options &options )
+	: options_( options )
 {
 	auto error = pyra_error{};
-	if (pyra_context_create( nullptr, &context_, &error ) != PYRA_OK)
+	if (pyra_context_create( &options, &context_, &error ) != PYRA_OK)
 		throw std::runtime_error( error.message );
+	auto info = pyra_backend_info{ sizeof( pyra_backend_info ), 0, nullptr, nullptr };
+	if (pyra_get_backend_info( options.backend, &info, &error ) == PYRA_OK)
+		backend_description_ = QStringLiteral( "%1 %2" ).arg( QString::fromUtf8( info.name ),
+			QString::fromUtf8( info.version ) );
 }
 
 
@@ -167,7 +191,71 @@ RenderEvaluator::~RenderEvaluator ()
 }
 
 
-OpenInfo RenderEvaluator::open ( const QString &path )
+OpenInfo RenderEvaluator::open ( const QString &path, pyra_backend backend )
+{
+	auto options = options_;
+	options.backend = backend;
+	return open( path, options );
+}
+
+
+OpenInfo RenderEvaluator::open ( const QString &path, const pyra_context_options &options )
+{
+	auto info = OpenInfo{};
+	try {
+		auto candidate = RenderEvaluator( options );
+		const auto start = Clock::now();
+		info = candidate.load( path );
+		info.open_ms = elapsed_ms( start );
+		info.backend = candidate.backend_description_;
+		if (!info.error.isEmpty())
+			return info;
+		const auto canonical = QFileInfo( path ).canonicalFilePath();
+		info.recording_preserved = wsi_ && !canonical.isEmpty() && canonical == path_;
+		if (info.recording_preserved) {
+			for (const auto &request : recorded_) {
+				const auto find = [&request] ( const auto &planes ) {
+					return std::find_if( planes.begin(), planes.end(), [&request] ( const auto &plane ) {
+						return plane.plane == request.plane;
+					} );
+				};
+				const auto before = find( planes_ );
+				const auto after = find( info.planes );
+				const auto near = [] ( double a, double b ) {
+					return std::abs( a - b ) <= 1e-5 * std::max( { 1.0, std::abs( a ), std::abs( b ) } );
+				};
+				if (before == planes_.end() || after == info.planes.end() ||
+					before->pixel_format != after->pixel_format ||
+					!near( before->native_mpp, after->native_mpp ) ||
+					!near( before->bounds.x(), after->bounds.x() ) ||
+					!near( before->bounds.y(), after->bounds.y() ) ||
+					!near( before->bounds.width(), after->bounds.width() ) ||
+					!near( before->bounds.height(), after->bounds.height() )) {
+					info.error = QStringLiteral( "Cannot compare this recording: the selected backend has "
+						"different planes, pixel formats or metric geometry. The current slide and recording were retained." );
+					return info;
+				}
+			}
+		} else {
+			recorded_.clear();
+		}
+		std::swap( context_, candidate.context_ );
+		std::swap( wsi_, candidate.wsi_ );
+		options_ = options;
+		planes_ = std::move( candidate.planes_ );
+		path_ = canonical;
+		backend_description_ = info.backend;
+		open_ms_ = info.open_ms;
+		recording_ = false;
+		info.recorded = recorded_.size();
+	} catch (const std::exception &error) {
+		info.error = QString::fromUtf8( error.what() );
+	}
+	return info;
+}
+
+
+OpenInfo RenderEvaluator::load ( const QString &path )
 {
 	recording_ = false;
 	recorded_.clear();
@@ -311,6 +399,9 @@ ReplayReport RenderEvaluator::replay ()
 {
 	recording_ = false;
 	auto report = ReplayReport{};
+	report.options = options_;
+	report.backend = backend_description_;
+	report.open_ms = open_ms_;
 	report.recorded = recorded_.size();
 	if (!wsi_ || recorded_.empty()) {
 		report.error = QStringLiteral( "Record at least one render on the currently open slide first." );

@@ -821,7 +821,7 @@ static bool ReadDeepJpegRows ( jpeg_decompress_struct &cinfo,
 
 
 template <typename pixeltype>
-static bool DecodeJpeg ( const uint8_t *bf, size_t len,
+static bool DecodeJpeg ( const uint8_t *bf, size_t len, ColorHint hint,
 	const TileDst<pixeltype> &dst, TileDiag &diag )
 {
 	auto cinfo = jpeg_decompress_struct{};
@@ -848,6 +848,14 @@ static bool DecodeJpeg ( const uint8_t *bf, size_t len,
 		LogDecodeFailure( ImgCodec::Jpeg, diag, bf, len, "jpeg_read_header failed" );
 		jpeg_destroy_decompress( &cinfo );
 		return false;
+	}
+	if (cinfo.num_components == 3 && !cinfo.saw_JFIF_marker && !cinfo.saw_Adobe_marker) {
+// Use container metadata when JPEG colour markers are absent. PTF and other
+// self-describing JPEG streams keep their explicit JFIF/Adobe interpretation.
+		if (hint == ColorHint::Rgb)
+			cinfo.jpeg_color_space = JCS_RGB;
+		else if (hint == ColorHint::YCbCr)
+			cinfo.jpeg_color_space = JCS_YCbCr;
 	}
 
 	if (cinfo.data_precision > 8) {
@@ -1730,7 +1738,7 @@ static bool DecodeCziSubBlock ( const uint8_t *bf, size_t len,
 				break;
 			}
 			case libCZI::CompressionMode::Jpg:
-				return DecodeJpeg( payload, payload_len, dst, diag );
+				return DecodeJpeg( payload, payload_len, ColorHint::FromStream, dst, diag );
 			default:
 				LogDecodeFailure( ImgCodec::CziSubBlock, diag, bf, len,
 					"unsupported CZI compression mode" );
@@ -1868,9 +1876,6 @@ bool decode_tile ( const uint8_t *bf, size_t len, ColorHint hint,
 	auto t0 = std::chrono::steady_clock::now();
 	diag.decode_ms = 0.0;
 	diag.unsupported_codec = ImgCodec::None;
-#if !USE_OPENJPEG
-	(void)hint;								// only the JPEG 2000 path consults it
-#endif
 	if (!bf || len == 0 || !dst.reserve) {
 		LogDecodeFailure( ImgCodec::None, diag, bf, len, "empty tile buffer" );
 		return false;
@@ -1885,7 +1890,7 @@ bool decode_tile ( const uint8_t *bf, size_t len, ColorHint hint,
 	auto ok = false;
 	switch (codec) {
 		case ImgCodec::Jpeg:
-			ok = DecodeJpeg( bf, len, dst, diag );
+			ok = DecodeJpeg( bf, len, hint, dst, diag );
 			break;
 		case ImgCodec::Jp2k:
 #if USE_OPENJPEG

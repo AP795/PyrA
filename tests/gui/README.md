@@ -4,6 +4,18 @@ The optional `pyra_gui_test` application opens slides through Pyra's public C
 reader interface. All GUI/evaluator sources live here; the library has no Qt
 dependency. The viewer supports mouse dragging, wheel zoom, Fit, 1:1, and
 selection of a channel/Z plane. The inspector displays the slide's metadata.
+The **Open WSI** menu offers **PyrA native** and **OpenSlide**. Its main button
+and Ctrl+O reuse the last successfully selected reader. OpenSlide is disabled
+unless the library was built with `PYRA_WITH_OPENSLIDE=ON`; see the
+[Windows and Linux dependency setup](../../README.md#optional-openslide-backend).
+Open WSI includes the file path, reader, TBF/PBF cache sizes in MiB, and decoder
+thread count. Browse selects the file. PBF 0 disables retained decoded tiles;
+TBF must be at least 1 MiB in this dialog. OpenSlide enables PBF only, since it
+does not expose the native TBF or decoding-thread policies. Successful opens
+retain the selected settings for subsequent opens in the same viewer session.
+The settings initialize the C API context; changing them means reopening the
+slide, which retains a compatible recording and resets library caches. Replay
+reports show the actual selected settings rather than fixed defaults.
 
 The inspector's minimap shows a cached thumbnail of the selected plane and
 the current viewport outline. Click or drag inside the thumbnail to center
@@ -111,7 +123,7 @@ Use Linux paths to slide files copied into Client's accessible filesystem.
 
 ## Record / Stop / Replay
 
-1. Open a slide and press **Record**. This clears the previous workload and
+1. Choose a reader in **Open WSI**, open a slide and press **Record**. This clears the previous workload and
    requests a frame of the current view.
 2. Navigate or change channel/Z. Every actual Pyra render invocation is recorded,
    including repeated identical requests. A request retains metric `x, y, w, h`
@@ -124,11 +136,20 @@ Use Linux paths to slide files copied into Client's accessible filesystem.
 4. Press **Replay**. Requests execute sequentially, without coalescing, sleeping,
    changing their rectangles, or substituting the current window size. The GUI
    remains responsive. Stop cancels between calls, after any running call ends.
+5. Choose the other reader in **Open WSI** and reopen the **same file**. The
+   recording is retained if its planes, RGB format and metric geometry match.
+   Press **Replay** again. Both reports remain in the inspector and identify
+   their backend/version and separate opening time. A failed or incompatible
+   open leaves the current slide and workload usable.
 
 The report includes recorded/attempted counts, failures, incomplete frames,
 total render time, mean, median, nearest-rank p95, minimum/maximum, and render
 throughput. All attempts contribute to timing statistics; failures/incomplete
 frames are reported separately. Wall time is shown separately.
+Replay completion reveals the inspector and scrolls to the new report, including
+when the inspector was hidden or the report pane was collapsed. Earlier replay
+reports remain available. The animated busy indicator is hidden during replay;
+the status bar and Stop action still show that replay is active.
 
 Render time measures the synchronous `pyra_get_image` call, including tile
 loading, decoding, caching, resampling, and copying pixels to the caller's
@@ -140,8 +161,9 @@ is **not a cold-cache benchmark** and does not flush the OS
 page cache. Replays are a workload evaluator, not evidence of a speedup without
 a comparable baseline.
 
-Recordings stay in memory for the current open slide. Opening another slide
-clears them. The viewer writes no recording/configuration sidecars beside
+Recordings stay in memory for the current slide, including reopening it with
+either reader. Opening a different slide clears them. Pressing Record starts a
+new workload and clears the report. The viewer writes no recording/configuration sidecars beside
 slide files. The C wrapper uses request-local assembled rasters. The GUI retains
 one prepared display image, extending each view by up to a factor of 1.5 on each
 axis within its existing 4096-pixel edge limit. Panning reuses that image while
@@ -186,3 +208,12 @@ QT_QPA_PLATFORM=xcb "$HOME/build/Pyra/tests/gui/pyra_gui_test" --smoke-test \
 
 The window closes after the checks and screenshot. Synthetic tests do not
 establish performance on real SVS/NDPI/DICOM/CZI slides.
+
+OpenSlide exposes one unnamed RGB8 brightfield plane; native channel/Z stacks
+and deep grayscale planes are not interchangeable workloads. Both readers
+default to a 256 MiB PBF budget; native also defaults to 256 MiB TBF and one
+decoder thread. Open WSI can change these values. Context operations serialize;
+OpenSlide uses its own decoder policy. Opening, overview generation
+and the initial view can warm these caches before replay. Compare repeated runs
+in both reader orders; reopening does not flush the OS file cache. Backend
+sampling/decoder differences can change pixels even with matching geometry.

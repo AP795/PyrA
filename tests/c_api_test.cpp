@@ -27,6 +27,34 @@ void require ( bool condition, const char *message )
 }
 
 
+void test_backends ()
+{
+	auto info = pyra_backend_info{ sizeof( pyra_backend_info ) };
+	require( pyra_get_backend_info( PYRA_BACKEND_NATIVE, &info, nullptr ) == PYRA_OK &&
+		info.available && info.name && info.version, "Native backend information is missing" );
+	require( pyra_get_backend_info( PYRA_BACKEND_OPENSLIDE, &info, nullptr ) == PYRA_OK && info.name,
+		"OpenSlide backend information is missing" );
+	const auto available = info.available != 0;
+	auto options = pyra_context_options{};
+	pyra_context_options_init( &options );
+	require( options.backend == PYRA_BACKEND_NATIVE, "Native is not the default backend" );
+	options.backend = PYRA_BACKEND_OPENSLIDE;
+	auto *context = static_cast<pyra_context *>( nullptr );
+	auto error = pyra_error{};
+	const auto status = pyra_context_create( &options, &context, &error );
+	require( available ? status == PYRA_OK && context :
+		status == PYRA_UNSUPPORTED && !context && std::strstr( error.message, "PYRA_WITH_OPENSLIDE" ),
+		"Optional backend availability contract differs" );
+	if (context)
+		pyra_context_destroy( context, nullptr );
+	options.backend = UINT32_MAX;
+	require( pyra_context_create( &options, &context, nullptr ) == PYRA_INVALID_ARGUMENT && !context,
+		"Unknown backend was accepted" );
+	require( pyra_get_backend_info( UINT32_MAX, &info, nullptr ) == PYRA_INVALID_ARGUMENT,
+		"Unknown backend information was accepted" );
+}
+
+
 std::string utf8 ( const std::filesystem::path &path )
 {
 	const auto text = path.u8string();
@@ -340,6 +368,7 @@ int main ( int argc, char **argv )
 	if (argc != 2)
 		return 2;
 	try {
+		test_backends();
 		const auto directory = std::filesystem::path( argv[1] );
 		const auto source = directory / "standalone.ptf";
 		test_queries_and_ownership( source );

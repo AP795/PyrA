@@ -8,7 +8,7 @@ add_executable(pyra_fixture_writer fixture_writer_main.cpp test_fixture.cpp)
 target_link_libraries(pyra_fixture_writer PRIVATE pyra_core Qt6::Core)
 
 add_executable(pyra_gui_test main.cpp viewer_window.cpp viewer_window.h
-	viewport.cpp viewport.h minimap.cpp minimap.h)
+	viewport.cpp viewport.h minimap.cpp minimap.h open_wsi_dialog.cpp open_wsi_dialog.h)
 set_target_properties(pyra_gui_test PROPERTIES AUTOMOC ON)
 target_link_libraries(pyra_gui_test PRIVATE pyra_gui_support Qt6::Widgets)
 add_dependencies(pyra_gui_test pyra_fixture_writer)
@@ -37,18 +37,24 @@ if(BUILD_TESTING)
 	add_test(NAME pyra_evaluator COMMAND pyra_evaluator_test
 		"${CMAKE_CURRENT_BINARY_DIR}/test_out/evaluator" "${CMAKE_BINARY_DIR}/test_out")
 	set_tests_properties(pyra_evaluator PROPERTIES FIXTURES_REQUIRED pyra_wsi_fixture)
+	if(PYRA_WITH_OPENSLIDE)
+		set_tests_properties(pyra_evaluator PROPERTIES FIXTURES_REQUIRED "pyra_wsi_fixture;pyra_openslide_fixture")
+	endif()
 	add_test(NAME pyra_gui_smoke COMMAND pyra_gui_test --smoke-test
 		"${CMAKE_CURRENT_BINARY_DIR}/test_out/gui")
 	set_tests_properties(pyra_gui_smoke PROPERTIES
 		ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 40)
 	add_executable(pyra_viewer_behavior_test viewer_behavior_test.cpp viewer_window.cpp
-		viewport.cpp viewport.h minimap.cpp minimap.h)
+		viewport.cpp viewport.h minimap.cpp minimap.h open_wsi_dialog.cpp open_wsi_dialog.h)
 	set_target_properties(pyra_viewer_behavior_test PROPERTIES AUTOMOC ON)
 	target_link_libraries(pyra_viewer_behavior_test PRIVATE pyra_gui_support Qt6::Widgets)
 	add_dependencies(pyra_viewer_behavior_test pyra_fixture_writer)
 	add_test(NAME pyra_viewer_behavior COMMAND pyra_viewer_behavior_test "${CMAKE_BINARY_DIR}/test_out")
 	set_tests_properties(pyra_viewer_behavior PROPERTIES FIXTURES_REQUIRED pyra_wsi_fixture
 		ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 40)
+	if(PYRA_WITH_OPENSLIDE)
+		set_tests_properties(pyra_viewer_behavior PROPERTIES FIXTURES_REQUIRED "pyra_wsi_fixture;pyra_openslide_fixture")
+	endif()
 endif()
 
 if(WIN32)
@@ -58,6 +64,11 @@ if(WIN32)
 				COMMAND ${CMAKE_COMMAND} -E copy_if_different
 				$<TARGET_RUNTIME_DLLS:${gui_target}> $<TARGET_FILE_DIR:${gui_target}>
 				COMMAND_EXPAND_LISTS)
+			if(PYRA_WITH_OPENSLIDE)
+				add_custom_command(TARGET ${gui_target} POST_BUILD
+					COMMAND ${CMAKE_COMMAND} -E copy_if_different
+						"${PYRA_OPENSLIDE_DLL}" $<TARGET_FILE_DIR:${gui_target}>)
+			endif()
 			foreach(platform_plugin Qt6::QWindowsIntegrationPlugin Qt6::QOffscreenIntegrationPlugin)
 				if(TARGET ${platform_plugin})
 					add_custom_command(TARGET ${gui_target} POST_BUILD

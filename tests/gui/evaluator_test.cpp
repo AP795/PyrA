@@ -83,9 +83,68 @@ void test_recording_restart_and_wsi_replacement ( const QString &path )
 	require( evaluator.stop() == 0, "Record did not clear the previous workload" );
 	evaluator.record();
 	(void)evaluator.render( request );
-	(void)evaluator.open( path );
-	require( evaluator.recorded().empty() && !evaluator.replay().error.isEmpty(),
-		"Opening a slide retained an obsolete recording" );
+	const auto reopened = evaluator.open( path );
+	require( reopened.error.isEmpty() && reopened.recording_preserved && evaluator.recorded().size() == 1,
+		"Reopening the same slide lost its recording" );
+	const auto failed = evaluator.open( path + QStringLiteral( ".missing" ) );
+	require( !failed.error.isEmpty() && evaluator.recorded().size() == 1 &&
+		evaluator.render( request ).error.isEmpty(), "Failed open lost the slide or recording" );
+	auto backend = pyra_backend_info{ sizeof( pyra_backend_info ) };
+	pyra_get_backend_info( PYRA_BACKEND_OPENSLIDE, &backend, nullptr );
+	if (backend.available) {
+		const auto incompatible = evaluator.open( path, PYRA_BACKEND_OPENSLIDE );
+		require( !incompatible.error.isEmpty() && evaluator.recorded().size() == 1 &&
+			evaluator.render( request ).error.isEmpty(), "Incompatible backend lost the existing plane/recording" );
+	}
+}
+
+
+void test_backend_replay ( const QString &directory )
+{
+	auto info = pyra_backend_info{ sizeof( pyra_backend_info ) };
+	require( pyra_get_backend_info( PYRA_BACKEND_OPENSLIDE, &info, nullptr ) == PYRA_OK, "Backend query failed" );
+	if (!info.available)
+		return;
+	auto evaluator = pyra::test::RenderEvaluator{};
+	const auto source = QDir( directory ).filePath( QStringLiteral( "openslide/compare.ptf" ) );
+	auto options = pyra::test::reader_options();
+	options.compressed_cache_bytes = 64 * pyra::test::kBytesPerMiB;
+	options.decoded_cache_bytes = 0;
+	options.decode_threads = 3;
+	require( evaluator.open( source, options ).error.isEmpty(), "Native comparison open failed" );
+	const auto first = pyra::test::RenderRequest{ { -1, -1, 16, 12 }, 0.5, {} };
+	auto second = first;
+	second.xywh = { 4, 6, 12, 8 };
+	second.mpp = 1;
+	evaluator.record();
+	require( evaluator.render( first ).error.isEmpty() && evaluator.render( second ).error.isEmpty(), "Recording failed" );
+	(void)evaluator.stop();
+	evaluator.prepare_replay();
+	const auto native = evaluator.replay();
+	require( native.options.decode_threads == 3 && native.options.decoded_cache_bytes == 0 &&
+		native.text().contains( QStringLiteral( "TBF cache: 64 MiB; PBF cache: 0 MiB; decoder threads: 3" ) ),
+		"Replay lost its actual context resource settings" );
+	auto invalid = options;
+	invalid.decode_threads = 0;
+	require( !evaluator.open( source, invalid ).error.isEmpty() && evaluator.recorded().size() == 2,
+		"Invalid resource options replaced the active recording" );
+	const auto opened = evaluator.open( source, PYRA_BACKEND_OPENSLIDE );
+	require( opened.error.isEmpty() && opened.recording_preserved && opened.recorded == 2 &&
+		evaluator.recorded()[0] == first && evaluator.recorded()[1] == second,
+		"Backend open changed the recorded requests" );
+	evaluator.prepare_replay();
+	const auto alternate = evaluator.replay();
+	require( alternate.error.isEmpty() && alternate.failed == 0 && alternate.timing.count == 2 &&
+		alternate.last_request == native.last_request && alternate.last_image == native.last_image &&
+		alternate.backend.contains( QStringLiteral( "OpenSlide" ) ) &&
+		native.backend.contains( QStringLiteral( "PyrA native" ) ) &&
+		alternate.text().contains( QStringLiteral( "output copy" ) ), "Cross-backend replay differs" );
+	require( alternate.options.decoded_cache_bytes == 0 && alternate.options.decode_threads == 3,
+		"Reopening with another reader lost the selected context settings" );
+	require( evaluator.open( source, PYRA_BACKEND_NATIVE ).error.isEmpty() && evaluator.recorded().size() == 2,
+		"Switching back lost the recording" );
+	require( evaluator.open( QDir( directory ).filePath( QStringLiteral( "standalone.ptf" ) ) ).error.isEmpty() &&
+		evaluator.recorded().empty(), "Different slide retained an obsolete recording" );
 }
 
 
@@ -257,6 +316,7 @@ int main ( int argc, char **argv )
 		} );
 		run( "test_recording_exact_order_and_stop", [&] { test_recording_exact_order_and_stop( path ); } );
 		run( "test_recording_restart_and_wsi_replacement", [&] { test_recording_restart_and_wsi_replacement( path ); } );
+		run( "test_backend_replay", [&] { test_backend_replay( QString::fromLocal8Bit( argv[2] ) ); } );
 		run( "test_replay_cancel_before_first_call", [&] { test_replay_cancel_before_first_call( path ); } );
 		run( "test_render_invalid_request_is_rejected", [&] { test_render_invalid_request_is_rejected( path ); } );
 		run( "test_overview_preserves_recording_and_plane_selection", [&] { test_overview_preserves_recording_and_plane_selection( path ); } );

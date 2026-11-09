@@ -19,13 +19,27 @@
 extern "C" {
 #endif
 
-#define PYRA_ABI_VERSION 1u
+#define PYRA_ABI_VERSION 2u
 #define PYRA_ERROR_MESSAGE_SIZE 512u
+#define PYRA_STAT_UNAVAILABLE UINT64_MAX
 
 typedef struct pyra_context pyra_context;
 typedef struct pyra_wsi pyra_wsi;
 typedef int32_t pyra_status;
 typedef uint32_t pyra_pixel_format;
+typedef uint32_t pyra_backend;
+
+enum {
+	PYRA_BACKEND_NATIVE = 0,
+	PYRA_BACKEND_OPENSLIDE = 1
+};
+
+typedef struct pyra_backend_info {
+	uint32_t struct_size;
+	uint32_t available;
+	const char *name;
+	const char *version;
+} pyra_backend_info;
 
 enum {
 	PYRA_OK = 0,
@@ -59,6 +73,7 @@ typedef struct pyra_context_options {
 	uint64_t decoded_cache_bytes;
 	uint64_t max_image_pixels;
 	uint32_t decode_threads;
+	pyra_backend backend;
 } pyra_context_options;
 
 typedef struct pyra_rect {
@@ -125,6 +140,9 @@ typedef struct pyra_context_stats {
 // to create uses these defaults. A zero decoded budget disables decoded caching;
 // compressed budget, image limit, and decoder worker count must be positive.
 PYRA_API void pyra_context_options_init ( pyra_context_options *options );
+// Static borrowed strings. An unavailable backend has a null version.
+PYRA_API pyra_status pyra_get_backend_info ( pyra_backend backend,
+	pyra_backend_info *info, pyra_error *error );
 PYRA_API pyra_status pyra_context_create ( const pyra_context_options *options,
 	pyra_context **context, pyra_error *error );
 // Returns BUSY while WSI handles exist. Destroy/close must not race handle use.
@@ -166,6 +184,10 @@ PYRA_API pyra_status pyra_get_image ( pyra_wsi *wsi,
 // Independent contexts may run concurrently. Cache budgets cover retained tile
 // pixel/byte storage, not metadata, synthetic rasters, codec/render temporaries,
 // allocator overhead, or caller-owned output. They are not process-memory limits.
+// OpenSlide exposes one RGB8 plane and a shared decoded cache. Its compressed
+// cache and decode_threads options have no effect. Cache usage/eviction counters
+// unavailable from OpenSlide are PYRA_STAT_UNAVAILABLE (decoded usage is 0 when
+// its budget is 0). Other counters retain their usual meaning.
 
 #ifdef __cplusplus
 }

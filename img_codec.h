@@ -142,10 +142,12 @@ bool read_img_codec_info ( const uint8_t *bf, size_t len, ImgCodecInfo *out,
 	std::string *error = nullptr );
 
 
-// How to interpret the decoded colour components.
+// Container colour information absent from, or ambiguous in, the codestream.
 //
-// FromStream is right whenever the encoding is self-describing: a JPEG 2000
-// codestream signals its multiple-component transform (YBR_ICT / YBR_RCT) in
+// JPEG-in-TIFF uses Rgb or YCbCr from the photometric tag when JFIF/Adobe colour
+// markers are absent; component IDs alone can be ambiguous. Explicit JPEG
+// markers and FromStream retain normal header detection. A JPEG 2000 codestream
+// signals its multiple-component transform (YBR_ICT / YBR_RCT) in
 // the COD marker and the decoder undoes it, so the output is already RGB.
 // YCbCr exists for Aperio compression 33003, which stores YCbCr with the MCT
 // switched off - that is not recoverable from the codestream, so the container

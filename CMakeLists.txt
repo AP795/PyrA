@@ -3,7 +3,7 @@
 # Qt is used only by the optional viewer and its test support under tests/gui.
 
 cmake_minimum_required(VERSION 3.20)
-project(Pyra VERSION 0.1.0 LANGUAGES C CXX)
+project(Pyra VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,6 +18,7 @@ option(PYR_WITH_JXL      "JPEG XL tile and image codec"                        O
 option(PYR_WITH_DCMTK    "DICOM VL Whole Slide Microscopy loader"              OFF)
 option(PYR_WITH_CZI      "Zeiss CZI loader (libCZI, LGPL - link dynamically)"  OFF)
 option(PYRA_BUILD_GUI_TEST "Build the optional Qt Widgets viewer/evaluator" OFF)
+option(PYRA_WITH_OPENSLIDE "Build the optional dynamically linked OpenSlide C API backend" OFF)
 option(PYRA_ENABLE_IPO "Enable interprocedural/link-time optimization in Release" ON)
 option(PYRA_ENABLE_AVX2 "Require an AVX2-capable CPU for Release binaries" OFF)
 
@@ -130,6 +131,7 @@ set(USE_OPENJPEG ${PYR_WITH_OPENJPEG})
 set(USE_JXL ${PYR_WITH_JXL})
 set(USE_DCMTK ${PYR_WITH_DCMTK})
 set(USE_CZI ${PYR_WITH_CZI})
+set(USE_OPENSLIDE ${PYRA_WITH_OPENSLIDE})
 configure_file(
 	build_config_generated.h.in
 	${CMAKE_CURRENT_BINARY_DIR}/generated/pyr_build_config_generated.h)
@@ -168,7 +170,8 @@ if(PYR_WITH_JXL)
 	include(cmake/PyraJxl.cmake)
 endif()
 
-add_library(pyra SHARED pyra_c.cpp include/pyra/pyra.h)
+add_library(pyra SHARED pyra_c.cpp pyra_api_internal.h pyra_openslide.cpp
+	pyra_openslide.h include/pyra/pyra.h)
 add_library(Pyra::pyra ALIAS pyra)
 target_compile_features(pyra PRIVATE cxx_std_20)
 target_compile_definitions(pyra PRIVATE PYRA_BUILDING_LIBRARY=1)
@@ -176,7 +179,7 @@ target_include_directories(pyra PUBLIC
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 	$<INSTALL_INTERFACE:include>)
 target_link_libraries(pyra PRIVATE pyra_core)
-set_target_properties(pyra PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1
+set_target_properties(pyra PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 2
 	CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 if(UNIX AND NOT APPLE)
 	target_link_options(pyra PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/pyra.exports")
@@ -190,6 +193,9 @@ endif()
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+if(PYRA_WITH_OPENSLIDE)
+	include(cmake/PyraOpenSlide.cmake)
+endif()
 install(TARGETS pyra EXPORT PyraTargets
 	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -208,6 +214,13 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/PyraConfig.cmake
 
 include(CTest)
 if(BUILD_TESTING)
+	add_executable(pyra_c_api_sample tests/c_api_sample.cpp)
+	target_link_libraries(pyra_c_api_sample PRIVATE Pyra::pyra JPEG::JPEG)
+	if(MSVC)
+		target_compile_options(pyra_c_api_sample PRIVATE /W4 /permissive- /utf-8)
+	else()
+		target_compile_options(pyra_c_api_sample PRIVATE -Wall -Wextra)
+	endif()
 	add_executable(pyra_decode_pool_test tests/decode_pool_test.cpp)
 	target_link_libraries(pyra_decode_pool_test PRIVATE pyra_core)
 	add_test(NAME pyra_decode_pool COMMAND pyra_decode_pool_test)
@@ -226,6 +239,17 @@ if(BUILD_TESTING)
 	add_executable(pyra_c_header_test tests/c_header_test.c)
 	target_link_libraries(pyra_c_header_test PRIVATE Pyra::pyra)
 	add_test(NAME pyra_c_header COMMAND pyra_c_header_test)
+	add_executable(pyra_jpeg_colour_test tests/jpeg_colour_test.cpp)
+	target_include_directories(pyra_jpeg_colour_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+	target_link_libraries(pyra_jpeg_colour_test PRIVATE Pyra::pyra TIFF::TIFF)
+	add_test(NAME pyra_jpeg_colour COMMAND pyra_jpeg_colour_test "${CMAKE_CURRENT_BINARY_DIR}/test_out/jpeg_colour")
+	if(PYRA_WITH_OPENSLIDE)
+		add_executable(pyra_openslide_test tests/openslide_test.cpp)
+		target_include_directories(pyra_openslide_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+		target_link_libraries(pyra_openslide_test PRIVATE Pyra::pyra TIFF::TIFF)
+		add_test(NAME pyra_openslide COMMAND pyra_openslide_test "${CMAKE_CURRENT_BINARY_DIR}/test_out/openslide")
+		set_tests_properties(pyra_openslide PROPERTIES FIXTURES_SETUP pyra_openslide_fixture)
+	endif()
 endif()
 
 if(PYR_WITH_DCMTK)

@@ -4,6 +4,10 @@
 #include "pyr_build_config_generated.h"
 #endif
 
+#ifndef USE_OPENSLIDE
+#define USE_OPENSLIDE 0
+#endif
+
 // Central compile-time feature switches for the whole solution.
 //
 // Lives in pyr/ (the lowest layer) rather than wsia/ so the low-level libraries

@@ -4,3 +4,5 @@
 #cmakedefine01 USE_OPENJPEG
 #cmakedefine01 USE_JXL
 #cmakedefine01 USE_CZI
+#cmakedefine01 USE_OPENSLIDE
+#define PYRA_VERSION "@PROJECT_VERSION@"

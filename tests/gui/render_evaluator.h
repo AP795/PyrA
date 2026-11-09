@@ -1,6 +1,6 @@
 #pragma once
 
-#include <pyra/pyra.h>
+#include "reader_options.h"
 
 #include <QImage>
 #include <QRectF>
@@ -50,6 +50,10 @@ struct OpenInfo {
 	QString error;
 	QString metadata;
 	std::vector<PlaneInfo> planes;
+	QString backend;
+	double open_ms = 0;
+	std::size_t recorded = 0;
+	bool recording_preserved = false;
 };
 
 struct RenderResult {
@@ -76,6 +80,9 @@ TimingStats summarize_timings ( std::vector<double> milliseconds );
 
 struct ReplayReport {
 	QString error;
+	pyra_context_options options = reader_options();
+	QString backend;
+	double open_ms = 0;
 	TimingStats timing;
 	std::size_t recorded = 0;
 	std::size_t failed = 0;
@@ -91,11 +98,13 @@ struct ReplayReport {
 // Record/Stop are ordered with render calls on that same thread.
 class RenderEvaluator {
 public:
-	RenderEvaluator ();
+	explicit RenderEvaluator ( pyra_backend backend = PYRA_BACKEND_NATIVE );
+	explicit RenderEvaluator ( const pyra_context_options &options );
 	~RenderEvaluator ();
 	RenderEvaluator ( const RenderEvaluator & ) = delete;
 	RenderEvaluator &operator= ( const RenderEvaluator & ) = delete;
-	OpenInfo open ( const QString &path );
+	OpenInfo open ( const QString &path, pyra_backend backend = PYRA_BACKEND_NATIVE );
+	OpenInfo open ( const QString &path, const pyra_context_options &options );
 	RenderResult render ( const RenderRequest &request, bool display = true );
 	RenderResult overview ( const PlaneSelection &plane );
 	void record ();
@@ -107,12 +116,17 @@ public:
 
 private:
 	enum class RenderPurpose { Viewport, Overview };
+	OpenInfo load ( const QString &path );
 	RenderResult render_frame ( const RenderRequest &request, bool display, RenderPurpose purpose );
 
 	pyra_context *context_ = nullptr;
+	pyra_context_options options_ = reader_options();
 	pyra_wsi *wsi_ = nullptr;
 	std::vector<PlaneInfo> planes_;
 	std::vector<RenderRequest> recorded_;
+	QString path_;
+	QString backend_description_;
+	double open_ms_ = 0;
 	bool recording_ = false;
 	std::atomic<bool> cancel_{ false };
 };
