@@ -1,6 +1,6 @@
 # PyrA
 
-PyrA is a standalone library with a C interface for reading and rendering
+PyrA is a standalone library with optional C interface for reading and rendering
 tiled, multiresolution whole-slide images. Its implementation uses C++20;
 applications can use C or C++. Its GitHub repository is **PyrA**.
 
@@ -8,7 +8,7 @@ applications can use C or C++. Its GitHub repository is **PyrA**.
 
 - SVS, NDPI, generic tiled TIFF (`.bif` and `.ptf`), and image galleries
   (`.glr`). Ordinary `.tif` files are gallery members, not WSI entry points.
-- Optional DICOM WSI and Zeiss CZI loaders.
+- Optional DICOM WSI and Zeiss CZI loaders (both require 3rd party libraries).
 - JPEG decoding, with optional JPEG 2000 and JPEG XL codecs.
 - RGB8, RGB16, Gray8, Gray16, and floating-point raster types.
 - Region rendering, channel and focal-plane selection, tile caching, and
@@ -180,7 +180,7 @@ under `~/.config/pyra_gui_test/`, restoring that image on the next normal start.
 ## Scope of the initial fork
 
 The WSIA checkout continues to use its original `pyr/` directory. Pyra is
-maintained independently; no automatic synchronization is configured.
+maintained independently; no automatic synchronization is configured for the moment.
 
 The standalone tests cover generated images and reader/codec integration.
 They do not replace validation against real SVS, NDPI, DICOM, or CZI slides.
