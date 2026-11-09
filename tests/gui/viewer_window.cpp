@@ -79,7 +79,7 @@ ViewerWindow::ViewerWindow ( const QString &image_directory )
 	busy_->setAccessibleName( tr( "Background work in progress" ) );
 	statusBar()->addPermanentWidget( busy_ );
 	debounce_.setSingleShot( true );
-	debounce_.setInterval( 40 );
+	debounce_.setInterval( 0 );
 	worker_ = new QObject;
 	worker_->moveToThread( &thread_ );
 	connect( &thread_, &QThread::finished, worker_, &QObject::deleteLater );
@@ -87,7 +87,8 @@ ViewerWindow::ViewerWindow ( const QString &image_directory )
 	connect( &debounce_, &QTimer::timeout, this, &ViewerWindow::schedule_render );
 	connect( viewport_, &Viewport::view_changed, this, [this] {
 		minimap_->set_view( viewport_->view_rect() );
-		debounce_.start();
+		if (!debounce_.isActive())
+			debounce_.start();
 	} );
 	connect( minimap_, &Minimap::center_requested, viewport_, &Viewport::center_on );
 	connect( open_, &QAction::triggered, this, [this] {
@@ -147,6 +148,10 @@ void ViewerWindow::select_plane ( int index )
 	pending_.reset();
 	debounce_.stop();
 	const auto plane = plane_info_[index];
+	displayed_request_.reset();
+	active_request_.reset();
+	latest_view_.reset();
+	overscan_failed_mpp_.reset();
 	minimap_->set_plane( plane.bounds );
 	viewport_->set_plane( plane.bounds, plane.native_mpp );
 	overview_loading_ = true;
@@ -161,11 +166,15 @@ void ViewerWindow::select_plane ( int index )
 			overview_loading_ = false;
 			if (overview.incomplete) {
 				overview.image = {};
-				overview.error = tr( "Incomplete minimap overview." );
+				if (overview.error.isEmpty())
+					overview.error = tr( "Incomplete minimap overview." );
 			}
 			minimap_->set_overview( overview.image, overview.error );
-			if (!overview.error.isEmpty())
+			if (!overview.error.isEmpty()) {
 				metadata_->appendPlainText( tr( "Minimap: %1" ).arg( overview.error ) );
+				report_->setPlainText( overview.error );
+				statusBar()->showMessage( overview.error );
+			}
 			update_controls();
 		} );
 	} );
@@ -177,6 +186,10 @@ void ViewerWindow::open ( const QString &path )
 	if (opening_ || recording_ || replaying_ || stopping_)
 		return;
 	opening_ = true;
+	displayed_request_.reset();
+	active_request_.reset();
+	latest_view_.reset();
+	overscan_failed_mpp_.reset();
 	overview_loading_ = false;
 	pending_.reset();
 	debounce_.stop();
@@ -227,8 +240,19 @@ void ViewerWindow::schedule_render ()
 	auto output = viewport_->size();
 	if (output.width() > kMaxRenderEdge || output.height() > kMaxRenderEdge)
 		output.scale( kMaxRenderEdge, kMaxRenderEdge, Qt::KeepAspectRatio );
-	pending_ = RenderRequest{ viewport_->view_rect(), output,
-		float( viewport_->mpp() ), plane_info_[index].plane };
+	const auto mpp = viewport_->mpp() * std::max(
+		double( viewport_->width() ) / output.width(), double( viewport_->height() ) / output.height() );
+	const auto view = RenderRequest{ viewport_->view_rect(), mpp, plane_info_[index].plane };
+	latest_view_ = view;
+	if (( displayed_request_ && view_request_is_covered( *displayed_request_, view ) ) ||
+		( active_request_ && view_request_is_covered( *active_request_, view ) )) {
+		pending_.reset();
+		if (smoke_step_ >= 0)
+			QTimer::singleShot( 0, this, &ViewerWindow::smoke_frame );
+		return;
+	}
+	pending_ = overscan_failed_mpp_ && *overscan_failed_mpp_ == view.mpp
+		? view : prepare_view_request( view );
 	dispatch_render();
 }
 
@@ -240,6 +264,7 @@ void ViewerWindow::dispatch_render ()
 	const auto request = *pending_;
 	pending_.reset();
 	rendering_ = true;
+	active_request_ = request;
 	update_controls();
 	const auto generation = generation_;
 	statusBar()->showMessage( tr( "Rendering…%1" ).arg( recording_ ? tr( " recording" ) : QString{} ) );
@@ -248,17 +273,39 @@ void ViewerWindow::dispatch_render ()
 		const auto count = evaluator_->recorded().size();
 		QMetaObject::invokeMethod( this, [this, frame = std::move( frame ), count, generation] {
 			rendering_ = false;
+			active_request_.reset();
 			if (generation == generation_ && !opening_ && !replaying_) {
 				recorded_count_ = count;
-				if (!frame.image.isNull())
+				if (frame.incomplete && latest_view_ && frame.request.plane == latest_view_->plane &&
+					frame.request.mpp == latest_view_->mpp && frame.request.xywh != latest_view_->xywh) {
+// Prefetch must not make a renderable visible view fail its working-set budget.
+// Retry the exact latest view once and retain that choice at this resolution.
+					overscan_failed_mpp_ = latest_view_->mpp;
+					pending_ = *latest_view_;
+					update_controls();
+					dispatch_render();
+					return;
+				}
+				const auto keep_displayed = displayed_request_ && latest_view_ &&
+					view_request_is_covered( *displayed_request_, *latest_view_ ) &&
+					!view_request_is_covered( frame.request, *latest_view_ );
+				if (!frame.image.isNull() && !keep_displayed) {
 					viewport_->set_frame( frame.image, frame.request.xywh );
+					if (!frame.incomplete && frame.error.isEmpty())
+						displayed_request_ = frame.request;
+				}
 				statusBar()->showMessage( tr( "%1 ms | %2 × %3 px | %4 µm/px | recorded: %5%6%7" )
-					.arg( frame.render_ms, 0, 'f', 3 ).arg( frame.request.output.width() )
-					.arg( frame.request.output.height() ).arg( frame.request.mpp )
+					.arg( frame.render_ms, 0, 'f', 3 ).arg( frame.output.width() )
+					.arg( frame.output.height() ).arg( frame.request.mpp )
 					.arg( qulonglong( count ) ).arg( recording_ ? tr( " — RECORDING" ) : QString{} )
 					.arg( frame.incomplete ? tr( " — INCOMPLETE" ) : QString{} ) );
-				if (!frame.error.isEmpty())
+				if (!frame.error.isEmpty()) {
 					report_->setPlainText( frame.error );
+					statusBar()->showMessage( frame.error );
+					displayed_request_.reset();
+				}
+				if (frame.incomplete)
+					displayed_request_.reset();
 				if (smoke_step_ >= 0) {
 					if (!frame.error.isEmpty() || frame.incomplete)
 						smoke_finish( 1 );
@@ -276,10 +323,12 @@ void ViewerWindow::dispatch_render ()
 void ViewerWindow::record ()
 {
 	recording_ = true;
+	displayed_request_.reset();
+	active_request_.reset();
 	recorded_count_ = 0;
 	QMetaObject::invokeMethod( worker_, [engine = evaluator_] { engine->record(); } );
 	report_->setPlainText( tr( "Recording actual render calls.\nNavigate, then press Stop.\n"
-		"Every call retains metric xywh, mpp, output dimensions, channel and Z." ) );
+		"Every call retains metric xywh, mpp, channel and Z; dimensions follow from mpp." ) );
 	update_controls();
 	schedule_render();
 }
@@ -335,7 +384,7 @@ void ViewerWindow::replay ()
 			update_controls();
 			if (smoke_step_ >= 0) {
 				std::cout << report.text().toStdString() << std::endl;
-				const auto ok = report.error.isEmpty() && report.recorded >= 6 &&
+				const auto ok = report.error.isEmpty() && report.recorded >= 4 &&
 					report.timing.count == report.recorded && report.failed == 0 &&
 					report.incomplete == 0 && !report.cancelled;
 				QTimer::singleShot( 150, this, [this, ok] { smoke_finish( ok ? 0 : 1 ); } );

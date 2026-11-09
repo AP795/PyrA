@@ -1,6 +1,6 @@
 #pragma once
 
-#include "wsi_session.h"
+#include <pyra/pyra.h>
 
 #include <QImage>
 #include <QRectF>
@@ -9,28 +9,41 @@
 
 #include <atomic>
 #include <cstddef>
-#include <tuple>
 #include <vector>
 
 namespace pyra::test {
 
 inline constexpr auto kMaxRenderEdge = 4096;
 inline constexpr auto kOverviewEdge = 256;
+inline constexpr auto kViewOverscanFactor = 1.5;
+
+struct PlaneSelection {
+	QString channel;
+	double zlevel = 0;
+
+	bool operator== ( const PlaneSelection & ) const = default;
+};
 
 struct RenderRequest {
 	QRectF xywh;
-	QSize output;
-	float mpp = 1.0f;
-	priml::PlaneSel plane;
+	double mpp = 1.0;
+	PlaneSelection plane;
 
 	bool operator== ( const RenderRequest & ) const = default;
 };
 
+// GUI-owned prepared images are bounded by kMaxRenderEdge on both axes.
+RenderRequest prepare_view_request ( const RenderRequest &view );
+bool view_request_is_covered ( const RenderRequest &prepared, const RenderRequest &view );
+
 struct PlaneInfo {
-	priml::PlaneSel plane;
+	PlaneSelection plane;
 	QRectF bounds;
 	float native_mpp = 1.0f;
 	QString label;
+	uint32_t index = 0;
+	pyra_pixel_format pixel_format = 0;
+	double max_sample_value = 1;
 };
 
 struct OpenInfo {
@@ -41,6 +54,7 @@ struct OpenInfo {
 
 struct RenderResult {
 	RenderRequest request;
+	QSize output;
 	QImage image;
 	QString error;
 	double render_ms = 0.0;
@@ -77,9 +91,13 @@ struct ReplayReport {
 // Record/Stop are ordered with render calls on that same thread.
 class RenderEvaluator {
 public:
+	RenderEvaluator ();
+	~RenderEvaluator ();
+	RenderEvaluator ( const RenderEvaluator & ) = delete;
+	RenderEvaluator &operator= ( const RenderEvaluator & ) = delete;
 	OpenInfo open ( const QString &path );
 	RenderResult render ( const RenderRequest &request, bool display = true );
-	RenderResult overview ( const priml::PlaneSel &plane );
+	RenderResult overview ( const PlaneSelection &plane );
 	void record ();
 	std::size_t stop ();
 	ReplayReport replay ();
@@ -89,13 +107,11 @@ public:
 
 private:
 	enum class RenderPurpose { Viewport, Overview };
-	using RenderCaches = std::tuple<priml::Render<priml::Rgb>, priml::Render<priml::Rgb16>,
-		priml::Render<uint8_t>, priml::Render<uint16_t>, priml::Render<float>>;
 	RenderResult render_frame ( const RenderRequest &request, bool display, RenderPurpose purpose );
 
-	priml::WsiSession session_;
-	RenderCaches caches_;
-	RenderCaches overview_caches_;
+	pyra_context *context_ = nullptr;
+	pyra_slide *slide_ = nullptr;
+	std::vector<PlaneInfo> planes_;
 	std::vector<RenderRequest> recorded_;
 	bool recording_ = false;
 	std::atomic<bool> cancel_{ false };

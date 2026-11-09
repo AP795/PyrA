@@ -1,6 +1,6 @@
 # Linux test viewer and render evaluator
 
-The optional `pyra_gui_test` application opens slides through Pyra's public
+The optional `pyra_gui_test` application opens slides through Pyra's public C
 reader interface. All GUI/evaluator sources live here; the library has no Qt
 dependency. The viewer supports mouse dragging, wheel zoom, Fit, 1:1, and
 selection of a channel/Z plane. The inspector displays the slide's metadata.
@@ -115,7 +115,8 @@ Use Linux paths to slide files copied into Client's accessible filesystem.
    requests a frame of the current view.
 2. Navigate or change channel/Z. Every actual Pyra render invocation is recorded,
    including repeated identical requests. A request retains metric `x, y, w, h`
-   in microns, sampling MPP, exact output pixel width/height, and channel/Z.
+   in microns, sampling MPP, and channel/Z. Output dimensions are derived from
+   the rectangle and MPP by the C interface.
    Preview painting and coalesced navigation events do not invoke the renderer.
 3. Press **Stop**. Its position in the serialized worker queue defines the
    recording boundary. Already running/queued calls precede Stop; undispatched
@@ -129,16 +130,36 @@ total render time, mean, median, nearest-rank p95, minimum/maximum, and render
 throughput. All attempts contribute to timing statistics; failures/incomplete
 frames are reported separately. Wall time is shown separately.
 
-Render time measures the Pyra `Generate` call, including its tile loading,
-decoding, caching and resampling. It excludes Qt image conversion, painting,
-interaction delays, and slide opening. Replay retains the existing slide and
-cache state, so it is **not a cold-cache benchmark** and does not flush the OS
+Render time measures the synchronous `pyra_get_image` call, including tile
+loading, decoding, caching, resampling, and copying pixels to the caller's
+buffer. It excludes caller buffer allocation, Qt image conversion, painting,
+interaction delays, layout queries, and slide opening. Requests contain a
+plane, metric rectangle, and mpp; raster dimensions follow the C interface's
+rounding rule. Replay retains the existing slide and tile-cache state, so it
+is **not a cold-cache benchmark** and does not flush the OS
 page cache. Replays are a workload evaluator, not evidence of a speedup without
 a comparable baseline.
 
 Recordings stay in memory for the current open slide. Opening another slide
 clears them. The viewer writes no recording/configuration sidecars beside
-slide files.
+slide files. The C wrapper uses request-local assembled rasters. The GUI retains
+one prepared display image, extending each view by up to a factor of 1.5 on each
+axis within its existing 4096-pixel edge limit. Panning reuses that image while
+coverage, channel/Z, and mpp match; crossing its edge schedules fresh rendering.
+Navigation is coalesced without waiting for mouse motion to stop. At most one
+render is active and one latest view is pending. These caller-owned display
+images are outside the C context's tile-cache caps.
+If the expanded request is incomplete, the viewer retries the exact visible
+rectangle and disables overscan at that resolution for the current plane.
+
+Recordings contain actual C render calls, including their prepared rectangles;
+pans served entirely by the existing image do not add a call. Full-range RGB8
+and Gray8 display uses native packed Qt images; wider/narrow-range samples keep
+their explicit display scaling. Unsupported compression appears in the status
+bar and inspector with its codec/build requirement.
+
+The GUI links only the shared C reader library. Its synthetic PTF writer runs in the
+separate `pyra_fixture_writer` executable beside the GUI and evaluator tests.
 
 ## Automated checks and GUI smoke mode
 

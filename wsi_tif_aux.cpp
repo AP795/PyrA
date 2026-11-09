@@ -18,9 +18,16 @@ TiffHandle::~TiffHandle ()
 bool TiffHandle::open ( const std::string &filename )
 {
 	close();
-	TIFFSetErrorHandler( nullptr );
-	TIFFSetWarningHandler( nullptr );
+	static auto handlers_once = std::once_flag{};
+	std::call_once( handlers_once, [] {
+		TIFFSetErrorHandler( nullptr );
+		TIFFSetWarningHandler( nullptr );
+	} );
+#ifdef _WIN32
+	tif_ = TIFFOpenW( pyr::path_from_utf8( filename ).c_str(), "r" );
+#else
 	tif_ = TIFFOpen( filename.c_str(), "r" );
+#endif
 	return tif_ != nullptr;
 }
 

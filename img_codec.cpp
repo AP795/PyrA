@@ -29,20 +29,10 @@ extern "C" {
 #endif
 
 #if USE_JXL
-#define JXL_STATIC_DEFINE
-#define JXL_CMS_STATIC_DEFINE
 #include <jxl/color_encoding.h>
 #include <jxl/decode.h>
 #include <jxl/encode.h>
 
-#ifdef _MSC_VER
-#pragma comment(lib, "brotlicommon.lib")
-#pragma comment(lib, "brotlidec.lib")
-#pragma comment(lib, "brotlienc.lib")
-#pragma comment(lib, "hwy.lib")
-#pragma comment(lib, "jxl.lib")
-#pragma comment(lib, "jxl_cms.lib")
-#endif
 #endif
 
 #if USE_CZI
@@ -81,6 +71,24 @@ const char *img_codec_name ( ImgCodec codec )
 	if (idx < 0 || idx > (int)ImgCodec::Last)
 		return "?";
 	return img_codec_names[idx];
+}
+
+
+const char *img_codec_unavailable_reason ( ImgCodec codec ) noexcept
+{
+	switch (codec) {
+#if !USE_JXL
+	case ImgCodec::Jxl: return "Unsupported compression: JPEG XL (this build has PYR_WITH_JXL=OFF).";
+#endif
+#if !USE_OPENJPEG
+	case ImgCodec::Jp2k: return "Unsupported compression: JPEG 2000 (this build has PYR_WITH_OPENJPEG=OFF).";
+#endif
+#if !USE_CZI
+	case ImgCodec::CziSubBlock: return "Unsupported compression: CZI sub-block (this build has PYR_WITH_CZI=OFF).";
+#endif
+	case ImgCodec::JpegLs: return "Unsupported compression: JPEG-LS (no JPEG-LS decoder is built into Pyra).";
+	default: return nullptr;
+	}
 }
 
 
@@ -158,7 +166,7 @@ ImgCodec sniff_img_codec ( const uint8_t *bf, size_t len )
 static void MaybeDumpFailingTile ( ImgCodec codec, const TileDiag &diag,
 	const uint8_t *bf, size_t len, const char *reason )
 {
-	if (diag.level_no != 1 || !bf || len == 0)
+	if (!pyr::debug_file() || diag.level_no != 1 || !bf || len == 0)
 		return;
 
 	static std::atomic<bool> dumped = false;
@@ -1859,6 +1867,7 @@ bool decode_tile ( const uint8_t *bf, size_t len, ColorHint hint,
 {
 	auto t0 = std::chrono::steady_clock::now();
 	diag.decode_ms = 0.0;
+	diag.unsupported_codec = ImgCodec::None;
 #if !USE_OPENJPEG
 	(void)hint;								// only the JPEG 2000 path consults it
 #endif
@@ -1868,6 +1877,11 @@ bool decode_tile ( const uint8_t *bf, size_t len, ColorHint hint,
 	}
 
 	auto codec = sniff_img_codec( bf, len );
+	if (const auto *reason = img_codec_unavailable_reason( codec )) {
+		diag.unsupported_codec = codec;
+		LogDecodeFailure( codec, diag, bf, len, reason );
+		return false;
+	}
 	auto ok = false;
 	switch (codec) {
 		case ImgCodec::Jpeg:

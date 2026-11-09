@@ -1,0 +1,27 @@
+{
+	"version": 2,
+	"cmakeMinimumRequired": {
+		"major": 3,
+		"minor": 20,
+		"patch": 0
+	},
+	"configurePresets": [
+		{
+			"name": "windows-vs2026-base",
+			"hidden": true,
+			"generator": "Visual Studio 18 2026",
+			"architecture": "x64",
+			"toolset": "v145",
+			"cacheVariables": {
+				"CMAKE_CONFIGURATION_TYPES": "Release",
+				"CMAKE_TRY_COMPILE_CONFIGURATION": "Release",
+				"PYRA_BUILD_GUI_TEST": true
+			},
+			"vendor": {
+				"microsoft.com/VisualStudioSettings/CMake/1.0": {
+					"hostOS": [ "Windows" ]
+				}
+			}
+		}
+	]
+}

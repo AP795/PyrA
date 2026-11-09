@@ -1,5 +1,7 @@
 #include "wsi.h"
 
+#include <utility>
+
 namespace priml {
 
 // --- DecodePool ---
@@ -55,9 +57,16 @@ void DecodePool::worker_loop ( unsigned pool_idx ) {
 			if (stop_) return;
 			last_gen = generation_;
 		}
-		(*work_fn_)( pool_idx + 1 );
+		auto exception = std::exception_ptr{};
+		try {
+			(*work_fn_)( pool_idx + 1 );
+		} catch (...) {
+			exception = std::current_exception();
+		}
 		{
 			std::lock_guard lk( mtx_ );
+			if (exception && !batch_exception_)
+				batch_exception_ = exception;
 			++done_;
 		}
 		cv_done_.notify_one();
@@ -76,19 +85,36 @@ void DecodePool::run_batch ( unsigned worker_count, std::function<void(unsigned)
 	auto pool_count = worker_count - 1;
 	{
 		std::lock_guard lk( mtx_ );
+// New workers must not observe a previous generation's batch while the pool
+// grows. If thread creation fails, no worker may retain this call's function.
+		batch_size_ = 0;
+	}
+	ensure_workers( pool_count );
+	{
+		std::lock_guard lk( mtx_ );
 		work_fn_ = &fn;
 		batch_size_ = pool_count;
 		done_ = 0;
+		batch_exception_ = nullptr;
 		++generation_;
 	}
-	ensure_workers( pool_count );
 	cv_start_.notify_all();
-	fn( 0 );
+	try {
+		fn( 0 );
+	} catch (...) {
+		std::lock_guard lk( mtx_ );
+		if (!batch_exception_)
+			batch_exception_ = std::current_exception();
+	}
+	auto exception = std::exception_ptr{};
 	{
 		std::unique_lock lk( mtx_ );
 		cv_done_.wait( lk, [&] { return done_ >= pool_count; } );
 		work_fn_ = nullptr;
+		exception = std::exchange( batch_exception_, nullptr );
 	}
+	if (exception)
+		std::rethrow_exception( exception );
 }
 
 
@@ -111,7 +137,7 @@ std::ifstream &DecodePool::worker_file ( unsigned pool_idx,
 		slot = std::make_unique<std::ifstream>();
 	const auto &name = path.empty() ? filename_ : path;
 	if (!slot->is_open() && !name.empty())
-		slot->open( name, std::ios::binary );
+		slot->open( pyr::path_from_utf8( name ), std::ios::binary );
 	return *slot;
 }
 

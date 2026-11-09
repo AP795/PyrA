@@ -271,7 +271,7 @@ static void ReadNdpiJpegHeader ( const std::string &filename,
 		return;
 	}
 	auto header_size = level->block_sizes[0];
-	auto stream = std::ifstream( filename, std::ios::binary );
+	auto stream = std::ifstream( pyr::path_from_utf8( filename ), std::ios::binary );
 	if (!stream)
 		return;
 	level->hdrbf.resize( header_size );

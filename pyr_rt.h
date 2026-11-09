@@ -66,6 +66,11 @@ FILE *debug_file () noexcept;
 // session registry so two spellings of one slide resolve to one session.
 std::filesystem::path normalise_path ( const std::filesystem::path &path );
 
+inline std::filesystem::path path_from_utf8 ( std::string_view text )
+{
+	return std::filesystem::path( std::u8string( text.begin(), text.end() ) );
+}
+
 // UTF-8 to wide, for libCZI's wchar_t file API and the Win32 calls in the CZI
 // loader. UTF-16 on Windows; elsewhere a byte-wise widening, correct only for
 // ASCII paths.

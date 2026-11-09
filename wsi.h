@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <fstream>
 #include <map>
 #include <functional>
@@ -39,6 +40,7 @@ private:
 	std::mutex file_handles_mtx_;
 	std::string filename_;
 	std::function<void(unsigned)> *work_fn_ = nullptr;
+	std::exception_ptr batch_exception_;
 	std::mutex batch_mtx_;
 	std::mutex mtx_;
 	std::condition_variable cv_start_;
@@ -104,7 +106,7 @@ public:
 		pyramid.source_pixel_metric = {};
 		file_.close();
 		file_.clear();
-		file_.open( filename_, std::ios::binary );
+		file_.open( pyr::path_from_utf8( filename_ ), std::ios::binary );
 		if (!file_)
 			return false;
 		decode_pool_.set_file( filename_ );

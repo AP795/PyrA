@@ -250,6 +250,14 @@ bool WsiTifLoader::Open ( Ppyr &pyramid )
 			++ifd_idx;
 			continue;
 		}
+		auto compression = uint16_t{};
+		TIFFGetFieldDefaulted( tif, TIFFTAG_COMPRESSION, &compression );
+		const auto codec = compression == COMPRESSION_JXL ? ImgCodec::Jxl
+			: compression == COMPRESSION_JP2000 ? ImgCodec::Jp2k : ImgCodec::None;
+		if (img_codec_unavailable_reason( codec )) {
+			pyramid.unsupported_codec_->store( codec );
+			return false;
+		}
 
 		auto nx = static_cast<int>( ( w + tw - 1 ) / tw );
 		auto ny = static_cast<int>( ( h + th - 1 ) / th );

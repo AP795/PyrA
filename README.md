@@ -1,7 +1,8 @@
 # PyrA
 
-PyrA is a standalone C++20 library for reading and rendering tiled,
-multiresolution whole-slide images. Its GitHub repository is **PyrA**.
+PyrA is a standalone library with a C interface for reading and rendering
+tiled, multiresolution whole-slide images. Its implementation uses C++20;
+applications can use C or C++. Its GitHub repository is **PyrA**.
 
 ## Features
 
@@ -42,9 +43,59 @@ Use `CMAKE_PREFIX_PATH` or CMake's `TIFF_INCLUDE_DIR`, `TIFF_LIBRARY`,
 | `PYR_WITH_CZI` | OFF | libCZI, linked dynamically |
 | `BUILD_TESTING` | ON | None; tests generate their own small images |
 | `PYRA_BUILD_GUI_TEST` | OFF | Qt 6 Widgets; viewer and performance evaluator |
+| `PYRA_ENABLE_IPO` | ON | Compiler/linker support for Release IPO/LTO |
+| `PYRA_ENABLE_AVX2` | OFF | AVX2-capable target CPU for Release binaries |
+
+Release builds use the compiler's normal speed optimization settings and enable
+IPO/LTO after a compiler/linker support check. MSVC uses `/GL` and `/LTCG`;
+other supported toolchains use CMake's corresponding IPO settings. Pass
+`-DPYRA_ENABLE_IPO=OFF` to disable IPO, including for toolchains without support.
+
+Enable `PYRA_ENABLE_AVX2` to add `/arch:AVX2` with MSVC or `-mavx2` with
+GCC/Clang in Release. This requires an AVX2-capable CPU and operating system;
+there is no runtime fallback for older machines. The default is OFF for
+portable distribution. The local `windows-release-local` preset enables both
+IPO and AVX2. Set `PYRA_ENABLE_AVX2=OFF` for a build without that requirement.
+
+These options cover Pyra's library and enabled tests/viewer, leave Debug
+settings unchanged, and do not modify prebuilt codec SDKs. They are private
+build settings and are not exported to applications linking `Pyra::pyra`.
+
+For a Windows static JPEG XL SDK, enable `PYR_WITH_JXL` and provide
+`PYRA_JXL_INCLUDE_DIR` (containing `jxl/decode.h`) and
+`PYRA_JXL_LIBRARY_DIR` (containing `jxl`, `jxl_cms`, Brotli and Highway archives).
+The SDK must be >= 0.9 and match the selected MSVC runtime/configuration.
+The local Release preset enables the 0.11 SDK under `C:/c/jxl`. Linux continues
+to discover JPEG XL through pkg-config. If a source needs an unavailable codec,
+the C interface returns `PYRA_UNSUPPORTED` with the compression name and build
+requirement; the viewer shows that error rather than treating it as a cache issue.
 
 libCZI must use a compatible C++ runtime and remain dynamically linked.
 Third-party libraries retain their own licenses and distribution requirements.
+
+### Visual Studio folder mode
+
+Open this source directory with **File > Open > Folder**. The shared
+`CMakePresets.json` defines a hidden Visual Studio 2026 x64/v145 Release base.
+Put machine-specific SDK paths and the build directory in the Git-ignored
+`CMakeUserPresets.json`, inheriting `windows-vs2026-base`. Visual Studio lists
+the resulting user preset after reopening the folder. The local development
+preset is `windows-release-local`, displayed as **Windows x64 Release - local
+SDKs**, and builds under `C:/tmp/bld/Pyra/ide-release` with the GUI enabled.
+
+The same local configuration can be used from PowerShell:
+
+```powershell
+cmake --preset windows-release-local
+cmake --build --preset windows-release-local
+ctest --preset windows-release-local
+```
+
+The local `C:/c/btf/md/BTF64.lib` archive uses the Release `/MD` runtime.
+The default Visual Studio `x64-Debug` configuration does not supply SDK paths
+and uses a different runtime. Use the configured Release preset; a real Debug
+build needs compatible Debug SDK libraries. The local JPEG source layout also
+needs both its `src` headers and its generated `jconfig.h` parent directory.
 
 ## Use from CMake
 
@@ -53,18 +104,36 @@ add_subdirectory(path/to/Pyra)
 target_link_libraries(my_application PRIVATE Pyra::pyra)
 ```
 
-The target supplies its include directories, C++20 requirement, feature
-configuration, and link dependencies. Include `wsi.h` for the reader,
-`img_codec.h` for codecs, and `ptf_write.h` for the PTF writer.
-Logging can be redirected with `pyr::set_log_sink`; otherwise it writes
-to stderr. No host-defined service symbols are required.
+`Pyra::pyra` is a shared library exposing `<pyra/pyra.h>`. Its public header
+requires no C++ runtime types, Qt headers, codec SDKs, or generated configuration
+headers. See [the C interface reference](docs/c-api.md) for ownership, resource
+budgets, image layout, errors, and an example. Diagnostics default to stderr.
+
+To install and consume an independently built package:
+
+```sh
+cmake --install build --config Release --prefix /path/to/pyra-install
+```
+
+```cmake
+find_package(Pyra CONFIG REQUIRED)
+target_link_libraries(my_application PRIVATE Pyra::pyra)
+```
+
+Set `CMAKE_PREFIX_PATH` to the installation prefix. Deploy the shared library
+and the runtime libraries required by the enabled codecs alongside your
+application or through the platform loader's search path. The install exports
+the C reader interface; codec and PTF writer C++ headers remain internal and
+are used by the source-tree tests through `pyra_core`.
 
 ## Linux test GUI
 
 The optional viewer lives in [`tests/gui/`](tests/gui/README.md). It provides
 pan/zoom, a navigable minimap, channel/Z selection, metadata, and a
 Record / Stop / Replay render performance evaluator. See that directory for Ubuntu 24.04 and WSLg setup,
-build commands, and timing semantics. Qt links only to the test application.
+build commands, and timing semantics. Its reader uses only the C interface;
+synthetic fixture generation runs in a separate helper executable. Qt links
+only to the test application and test support code.
 The viewer reads configuration and saves its last successfully opened image
 under `~/.config/pyra_gui_test/`, restoring that image on the next normal start.
 

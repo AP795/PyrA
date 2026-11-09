@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <shared_mutex>
@@ -160,11 +161,23 @@ struct SlotPool {
 
 	bool can_grow () const { return num_slots < max_slots; }
 
-	int grow_slots ( int slot_count ) {
+	int grow_slots ( int slot_count, size_t max_extra_bytes = SIZE_MAX ) {
 		auto add = std::min( slot_count, max_slots - num_slots );
 		if (add <= 0)
 			return 0;
-		buf.resize( ((size_t)num_slots + (size_t)add) * slot_elems_ );
+		const auto new_size = ((size_t)num_slots + (size_t)add) * slot_elems_;
+		if (new_size > buf.capacity()) {
+// Construct an exact-sized replacement rather than vector::resize's implicit
+// over-allocation. Account retained capacity, not just occupied slots.
+			auto grown = std::vector<ElemT>( new_size );
+			const auto extra = ( grown.capacity() - buf.capacity() ) * sizeof( ElemT );
+			if (extra > max_extra_bytes)
+				return 0;
+			std::copy( buf.begin(), buf.end(), grown.begin() );
+			buf.swap( grown );
+		} else {
+			buf.resize( new_size );
+		}
 		tpos.resize( num_slots + add, -1 );
 		for (int i = num_slots + add - 1; i >= num_slots; --i)
 			free_list_.push_back( i );
@@ -223,7 +236,9 @@ struct TileBf : SlotPool<uint8_t> {
 	size_t slot_bytes () const { return slot_elems_; }
 	size_t allocated_bytes () const { return buf.capacity(); }
 
-	int grow ( int slot_count ) { return grow_slots( slot_count ); }
+	int grow ( int slot_count, size_t max_extra_bytes = SIZE_MAX ) {
+		return grow_slots( slot_count, max_extra_bytes );
+	}
 };
 
 
@@ -254,7 +269,9 @@ struct PixBf : SlotPool<pixeltype> {
 	}
 	size_t allocated_bytes () const { return buf.capacity() * sizeof( pixeltype ); }
 
-	int grow ( int slot_count ) { return grow_slots( slot_count ); }
+	int grow ( int slot_count, size_t max_extra_bytes = SIZE_MAX ) {
+		return grow_slots( slot_count, max_extra_bytes );
+	}
 };
 
 // A tile carries no pixels and no pixel type - only where its pixels are.
@@ -825,6 +842,9 @@ struct Ppyr {
 	size_t pxb_cap_bytes = 0;				// 0 = no PixBf-specific cap
 	size_t ram_cap_bytes = 512ull * 1024ull * 1024ull;	// pyramid-wide pool cap
 	int decode_threads = 0;			// 0 = auto, >0 = fixed worker count
+// Optional context owner: bounds growth across slides and reclaims idle pools.
+// Called under the owner's serialization; true selects decoded storage.
+	std::function<size_t( bool, size_t )> cache_growth_budget;
 //
 // Synthetic coarse levels (BuildCoarseLevels in wsi.cpp), for slides whose file
 // stores no reduced-resolution layer. Set before OpenFile.
@@ -890,6 +910,10 @@ struct Ppyr {
 // and no label image at all.
 	bool barcode_from_metadata = false;
 	PpyrStats stats;
+// Decoder workers publish unavailable codecs here; the serialized C operation
+// clears it before a request and reports it through its error output.
+	std::unique_ptr<std::atomic<ImgCodec>> unsupported_codec_ =
+		std::make_unique<std::atomic<ImgCodec>>( ImgCodec::None );
 };
 
 

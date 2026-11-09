@@ -233,7 +233,12 @@ int WsiLoader::AcquireBufferSlot ( Ppyr &pyramid, int level_no,
 					(size_t)grow * pool.slot_bytes(), cap_bytes, allocated );
 				grow = (int)std::min( (size_t)grow,
 					allowed / std::max( size_t{ 1 }, pool.slot_bytes() ) );
-				if (grow > 0 && pool.grow( grow ) > 0)
+				if (pyramid.cache_growth_budget) {
+					allowed = std::min( allowed, pyramid.cache_growth_budget( Decoded, allowed ) );
+					grow = (int)std::min( (size_t)grow,
+						allowed / std::max( size_t{ 1 }, pool.slot_bytes() ) );
+				}
+				if (grow > 0 && pool.grow( grow, allowed ) > 0)
 					continue;
 			}
 		}

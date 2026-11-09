@@ -112,6 +112,9 @@ extern const char *const img_codec_names[];
 
 const char *img_codec_name ( ImgCodec codec );
 
+// Null when available; otherwise a user-facing codec/build requirement.
+const char *img_codec_unavailable_reason ( ImgCodec codec ) noexcept;
+
 // Stable lower-case identifier for configuration files. Only codecs that can
 // be selected for PTF encoding have an identifier; unsupported values return
 // an empty string. Parsing follows the same rule so JPEG XR/CZI payloads cannot
@@ -201,6 +204,7 @@ struct TileDiag {
 	int level_no = -1;
 	int tile_no = -1;
 	double decode_ms = 0.0;
+	ImgCodec unsupported_codec = ImgCodec::None;
 };
 
 

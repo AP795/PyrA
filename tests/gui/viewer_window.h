@@ -59,6 +59,10 @@ private:
 	QTimer debounce_;
 	std::vector<PlaneInfo> plane_info_;
 	std::optional<RenderRequest> pending_;
+	std::optional<RenderRequest> active_request_;
+	std::optional<RenderRequest> displayed_request_;
+	std::optional<RenderRequest> latest_view_;
+	std::optional<double> overscan_failed_mpp_;
 	std::size_t recorded_count_ = 0;
 	unsigned generation_ = 0;
 	std::atomic<unsigned> overview_generation_{ 0 };

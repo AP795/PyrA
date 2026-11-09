@@ -1,5 +1,6 @@
 #include "img_codec.h"
 #include "ptf_write.h"
+#include "tiff_inc.h"
 #include "wsi.h"
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -109,6 +111,34 @@ void test_ptf_write_render_round_trip ( const std::filesystem::path &output )
 }
 
 
+template <typename Pixel>
+void write_color_fixture ( const std::filesystem::path &output,
+	const char *name, priml::ImgCodec codec, Pixel value, int range )
+{
+	auto writer = priml::PtfWriter{};
+	auto error = std::string{};
+	require( writer.open( ( output / name ).string(), &error ), "Color fixture open: " + error );
+	auto spec = priml::PtfLevelSpec{};
+	spec.tags.valid = true;
+	spec.tags.mpp = 1;
+	spec.tags.pixel_type = priml::pixel_type_of<Pixel>::value;
+	spec.tags.max_pixel_value = range;
+	spec.size = { kTestEdge, kTestEdge };
+	spec.tile = spec.size;
+	spec.codec = codec;
+	spec.encode.quality = priml::kImageDefaultLossyQuality;
+	if (codec == priml::ImgCodec::Jp2k)
+		spec.encode.quality = priml::kImageLosslessQuality;
+	auto fetch = priml::PtfTileFetch<Pixel>(
+		[value] ( const priml::Rtlbr<int> &, priml::Pwhl<Pixel> *tile ) {
+			std::fill( tile->buf.begin(), tile->buf.end(), value );
+			return true;
+		} );
+	require( writer.add_level( spec, fetch, &error ), "Color fixture level: " + error );
+	require( writer.close( &error ), "Color fixture close: " + error );
+}
+
+
 template <typename Function>
 bool run_case ( const char *name, Function function )
 {
@@ -144,6 +174,47 @@ int main ( int argc, char **argv )
 #endif
 	passed &= run_case( "test_ptf_write_render_round_trip", [&] {
 		test_ptf_write_render_round_trip( std::filesystem::path( argv[1] ) );
+	} );
+	passed &= run_case( "write_unsupported_codec_fixture", [&] {
+		const auto output = std::filesystem::path( argv[1] );
+		const auto path = output / "unsupported.ptf";
+		std::filesystem::copy_file( output / "standalone.ptf", path, std::filesystem::copy_options::overwrite_existing );
+		auto handle = priml::TiffHandle{};
+		require( handle.open( path.string() ), "Cannot read unsupported-codec fixture directory" );
+		const auto offset = TIFFGetStrileOffset( static_cast<TIFF *>( handle.get() ), 0 );
+		handle.close();
+		auto stream = std::fstream( path, std::ios::in | std::ios::out | std::ios::binary );
+		const unsigned char jpeg_ls[] = { 0xff, 0xd8, 0xff, 0xf7 };
+		stream.seekp( (std::streamoff)offset );
+		stream.write( reinterpret_cast<const char *>( jpeg_ls ), sizeof( jpeg_ls ) );
+		require( bool( stream ), "Cannot write unsupported JPEG-LS tile signature" );
+	} );
+	passed &= run_case( "write_c_api_coarse_fixture", [&] {
+		auto writer = priml::PtfWriter{};
+		auto error = std::string{};
+		require( writer.open( ( std::filesystem::path( argv[1] ) / "coarse.ptf" ).string(), &error ), error );
+		auto spec = priml::PtfLevelSpec{};
+		spec.size = { 2048, 2048 };
+		spec.tile = { 256, 256 };
+		spec.tags.valid = true;
+		spec.tags.mpp = 1;
+		spec.tags.pixel_type = priml::LevelPixelType::Gray8;
+		spec.codec = priml::ImgCodec::Jpeg;
+		spec.encode.quality = priml::kImageDefaultLossyQuality;
+		auto fetch = priml::PtfTileFetch<uint8_t>(
+			[] ( const priml::Rtlbr<int> &, priml::Pwhl<uint8_t> *tile ) {
+				std::fill( tile->buf.begin(), tile->buf.end(), kGrayValue );
+				return true;
+			} );
+		require( writer.add_level( spec, fetch, &error ), error );
+		require( writer.close( &error ), error );
+	} );
+	passed &= run_case( "write_c_api_color_fixtures", [&] {
+		const auto output = std::filesystem::path( argv[1] );
+		write_color_fixture( output, "rgb8.ptf", priml::ImgCodec::Jpeg, priml::Rgb8{ 37, 117, 220 }, 255 );
+#if USE_OPENJPEG
+		write_color_fixture( output, "rgb16.ptf", priml::ImgCodec::Jp2k, priml::Rgb16{ 511, 2048, 4095 }, 4095 );
+#endif
 	} );
 	return passed ? 0 : 1;
 }

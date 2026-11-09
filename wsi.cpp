@@ -446,6 +446,28 @@ static void PinRenderPlanTiles ( Ppyr &pyramid,
 }
 
 
+class RenderTilePinGuard {
+public:
+	RenderTilePinGuard ( Ppyr &pyramid, const RenderPlan &plan )
+		: pyramid_( pyramid ), plan_( plan ) {
+		PinRenderPlanTiles( pyramid_, plan_, +1 );
+	}
+	~RenderTilePinGuard () { release(); }
+	RenderTilePinGuard ( const RenderTilePinGuard & ) = delete;
+	RenderTilePinGuard &operator= ( const RenderTilePinGuard & ) = delete;
+	void release () {
+		if (active_) {
+			PinRenderPlanTiles( pyramid_, plan_, -1 );
+			active_ = false;
+		}
+	}
+private:
+	Ppyr &pyramid_;
+	const RenderPlan &plan_;
+	bool active_ = true;
+};
+
+
 struct DecodeTask {
 	int tile_no = -1;
 	int pix_slot = -1;
@@ -478,6 +500,8 @@ static bool DecodeReservedTile ( WsiLoader &/*loader*/,
 
 	auto diag = TileDiag{ level_no, task.tile_no, 0.0 };
 	auto ok = decode_tile( bf, bf_sz, level.color_hint, dst, diag );
+	if (diag.unsupported_codec != ImgCodec::None)
+		pyramid.unsupported_codec_->store( diag.unsupported_codec );
 	decode_ms = diag.decode_ms;
 	if (!ok) {
 		tile.pbd_w = 0;
@@ -494,7 +518,7 @@ static bool DecodeReservedTile ( WsiLoader &/*loader*/,
 template <typename pixeltype>
 static bool DecodeTileToPixels ( const uint8_t *bf, size_t bf_sz,
 	ColorHint hint, int level_no, int tile_no, std::vector<pixeltype> &pixels,
-	Dim2D<int> &dimensions, double &decode_ms )
+	Dim2D<int> &dimensions, double &decode_ms, std::atomic<ImgCodec> &unsupported_codec )
 {
 	dimensions = {};
 	pixels.clear();
@@ -512,6 +536,8 @@ static bool DecodeTileToPixels ( const uint8_t *bf, size_t bf_sz,
 
 	auto diag = TileDiag{ level_no, tile_no, 0.0 };
 	auto ok = decode_tile( bf, bf_sz, hint, dst, diag );
+	if (diag.unsupported_codec != ImgCodec::None)
+		unsupported_codec.store( diag.unsupported_codec );
 	decode_ms = diag.decode_ms;
 	return ok;
 }
@@ -779,7 +805,7 @@ static int CompositeLoadedTilesDirectToRender ( WsiLoader &loader,
 			result.decoded = DecodeTileToPixels(
 				level.tbf.slot_ptr( tile.ninbuf ), tile.bf_sz, level.color_hint,
 				plan.level_no, tile_no, result.pixels, result.dimensions,
-				result.decode_ms );
+				result.decode_ms, *pyramid.unsupported_codec_ );
 			result.failed = !result.decoded;
 		} );
 		for (unsigned i = 0; i < count; ++i) {
@@ -1127,7 +1153,7 @@ static bool PrepareRenderTilesLocal ( WsiLoader &loader,
 	if (!need_decode)
 		return true;
 
-	PinRenderPlanTiles( pyramid, plan, +1 );
+	const auto pins = RenderTilePinGuard{ pyramid, plan };
 	EnsureTilesLoaded<pixeltype>( loader, pyramid, plan, pyr::next_version(),
 		stats->load_ok, stats->load_fail );
 
@@ -1150,7 +1176,6 @@ static bool PrepareRenderTilesLocal ( WsiLoader &loader,
 		decode_complete = stats->decode_fail == 0;
 		decoded = ready_tiles > 0;
 	}
-	PinRenderPlanTiles( pyramid, plan, -1 );
 	LogGenerateFailures( level_index, microns_per_pixel, plan,
 		stats->load_ok, stats->load_fail,
 		stats->decode_ok, stats->decode_fail,
@@ -1246,8 +1271,8 @@ Pwhl<pixeltype> WsiLoader::GenerateSpan (
 		}
 		pyramid.stats.requested_tiles += (uint64_t)plan.tiles.size();
 
-		static int genDbg = 0;
-		auto dbg = (genDbg++ < 10);
+		static auto genDbg = std::atomic<int>{ 0 };
+		auto dbg = (genDbg.fetch_add( 1, std::memory_order_relaxed ) < 10);
 		if (dbg && pyr::debug_file()) {
 			fprintf( pyr::debug_file(), "GEN: lvl=%d metric=%f mpp=%f out=%dx%d\n",
 				best_lvl_idx, level.metric, microns_per_pixel, out_w, out_h );
@@ -1264,8 +1289,11 @@ Pwhl<pixeltype> WsiLoader::GenerateSpan (
 		if (!PrepareRenderTilesLocal( *this, pyramid, *active_render,
 				plan, best_lvl_idx, microns_per_pixel, sel, &tile_stats ))
 		{
-			pyramid.stats.render_ms += ElapsedMs( render_t0 );
-			return Pwhl<pixeltype>();
+			if (( tile_stats.load_fail == 0 && tile_stats.decode_fail == 0 ) ||
+				!active_render->image.is_set()) {
+				pyramid.stats.render_ms += ElapsedMs( render_t0 );
+				return Pwhl<pixeltype>();
+			}
 		}
 
 		if (dbg && pyr::debug_file()) {
@@ -1286,12 +1314,16 @@ Pwhl<pixeltype> WsiLoader::GenerateSpan (
 				tile_stats.decode_fail );
 			pyramid.stats.dropped_tiles += missing;
 			pyramid.stats.incomplete_renders++;
-			pyr::plog_err(
-				"wsi generate INCOMPLETE: %llu of %zu tiles missing at level %d "
-				"(mpp=%.4f) - the frame has unpainted areas; "
-				"raise Ppyr::ram_cap_bytes or use a coarser level\n",
-				(unsigned long long)missing, plan.tiles.size(),
-				best_lvl_idx, microns_per_pixel );
+			if (const auto *reason = img_codec_unavailable_reason( pyramid.unsupported_codec_->load() )) {
+				pyr::plog_err( "wsi generate INCOMPLETE: %s\n", reason );
+			} else {
+				pyr::plog_err(
+					"wsi generate INCOMPLETE: %llu of %zu tiles missing at level %d "
+					"(mpp=%.4f) - the frame has unpainted areas; "
+					"raise Ppyr::ram_cap_bytes or use a coarser level\n",
+					(unsigned long long)missing, plan.tiles.size(),
+					best_lvl_idx, microns_per_pixel );
+			}
 		}
 
 		if (whole_slide_request && !is_finest &&
@@ -1391,10 +1423,11 @@ static Pwhl<pixeltype> DecimateLevelIntoImage ( WsiLoader &loader,
 	auto batch = RenderPlan{};
 	batch.level_no = src_level_no;
 	auto was_ready = std::vector<char>{};
+	auto complete = true;
 	auto flush = [&] {
 		if (batch.tiles.empty())
 			return;
-		PinRenderPlanTiles( pyramid, batch, +1 );
+		auto pins = RenderTilePinGuard{ pyramid, batch };
 		auto load_ok = 0;
 		auto load_fail = 0;
 		auto decode_ok = 0;
@@ -1402,6 +1435,7 @@ static Pwhl<pixeltype> DecimateLevelIntoImage ( WsiLoader &loader,
 		EnsureTilesLoaded<pixeltype>( loader, pyramid, batch, pyr::next_version(),
 			load_ok, load_fail );
 		EnsureTilesDecoded<pixeltype>( loader, pyramid, batch, decode_ok, decode_fail );
+		complete = complete && load_fail == 0 && decode_fail == 0;
 		for (auto tile_no : batch.tiles) {
 			auto &tile = src.tiles[tile_no];
 			if (tile.sts.load( std::memory_order_acquire ) != TileSts::Ready)
@@ -1413,7 +1447,7 @@ static Pwhl<pixeltype> DecimateLevelIntoImage ( WsiLoader &loader,
 					{ { 0, 0 }, { dst.w, dst.h } }, dst, { 0, 0 } );
 			}
 		}
-		PinRenderPlanTiles( pyramid, batch, -1 );
+		pins.release();
 //
 // Hand the buffers straight back: this pass exists precisely because the whole
 // level does not fit in the pools at once.
@@ -1443,11 +1477,14 @@ static Pwhl<pixeltype> DecimateLevelIntoImage ( WsiLoader &loader,
 			continue;
 		batch.tiles.push_back( tile_no );
 		was_ready.push_back( ready ? 1 : 0 );
-		if (batch.tiles.size() >= batch_size)
+		if (batch.tiles.size() >= batch_size) {
 			flush();
+			if (!complete)
+				return {};
+		}
 	}
 	flush();
-	return dst;
+	return complete ? std::move( dst ) : Pwhl<pixeltype>{};
 }
 
 

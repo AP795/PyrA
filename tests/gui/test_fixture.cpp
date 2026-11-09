@@ -65,6 +65,25 @@ QString write_test_slide ( const QString &directory )
 #endif
 	if (!writer.close( &error ))
 		throw std::runtime_error( error );
+	auto rgb_writer = priml::PtfWriter{};
+	const auto rgb_path = QDir( directory ).filePath( QStringLiteral( "gui_rgb_fixture.ptf" ) ).toUtf8();
+	if (!rgb_writer.open( rgb_path.constData(), &error ))
+		throw std::runtime_error( error );
+	auto rgb_spec = priml::PtfLevelSpec{};
+	rgb_spec.size = rgb_spec.tile = { kFixtureTileEdge, kFixtureTileEdge };
+	rgb_spec.tags.valid = true;
+	rgb_spec.tags.mpp = 1;
+	rgb_spec.tags.pixel_type = priml::LevelPixelType::Rgb8;
+	rgb_spec.tags.max_pixel_value = 255;
+	rgb_spec.codec = priml::ImgCodec::Jpeg;
+	rgb_spec.encode.quality = priml::kImageDefaultLossyQuality;
+	auto rgb_fetch = priml::PtfTileFetch<priml::Rgb8>(
+		[] ( const priml::Rtlbr<int> &, priml::Pwhl<priml::Rgb8> *tile ) {
+			std::fill( tile->buf.begin(), tile->buf.end(), priml::Rgb8{ 37, 117, 220 } );
+			return true;
+		} );
+	if (!rgb_writer.add_level( rgb_spec, rgb_fetch, &error ) || !rgb_writer.close( &error ))
+		throw std::runtime_error( error );
 	return path;
 }
 

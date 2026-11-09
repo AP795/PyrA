@@ -13,8 +13,10 @@ CLAUDE.md
 /build/
 /bld/
 /out/
+plans/
 test_out/
 CMakeUserPresets.json
+*.ps1
 *.user
 *.obj
 *.pdb

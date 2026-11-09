@@ -1,23 +1,9 @@
-# Standalone build for Pyra, the pyramid WSI reader.
-#
-# The solution builds these sources directly from each .vcxproj; this file is
-# not part of that. It exists so the library can be built on its own, and in
-# particular on Linux, which is the only real test of the claim that pyr/ is
-# platform-independent. Windows-specific code here sits behind _WIN32 (or
-# _MSC_VER for compiler pragmas): pyr_win.h, the UTF-16 branch of str2wstr in
-# pyr_rt.cpp, and in wsi_czi.cpp the delay-load probe and the Win32 ReadFile arm
-# of the read-cost measurement.
-#
-# Requires libtiff, libjpeg-turbo >= 3.0 and, by default, OpenJPEG 2.x; with
-# PYR_WITH_JXL, libjxl >= 0.9.
-#
-# Host services are injected through pyr_rt.h rather than linked by name: the
-# log sink (set_log_sink) and the verbose trace file (set_debug_file). An
-# executable linking this library needs to define nothing; both default to off
-# or stderr.
+# Standalone C++20 implementation and shared C reader interface for Pyra.
+# Requires libtiff, libjpeg-turbo >= 3.0 and, by default, OpenJPEG 2.x.
+# Qt is used only by the optional viewer and its test support under tests/gui.
 
 cmake_minimum_required(VERSION 3.20)
-project(Pyra VERSION 0.1.0 LANGUAGES CXX)
+project(Pyra VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,6 +18,10 @@ option(PYR_WITH_JXL      "JPEG XL tile and image codec"                        O
 option(PYR_WITH_DCMTK    "DICOM VL Whole Slide Microscopy loader"              OFF)
 option(PYR_WITH_CZI      "Zeiss CZI loader (libCZI, LGPL - link dynamically)"  OFF)
 option(PYRA_BUILD_GUI_TEST "Build the optional Qt Widgets viewer/evaluator" OFF)
+option(PYRA_ENABLE_IPO "Enable interprocedural/link-time optimization in Release" ON)
+option(PYRA_ENABLE_AVX2 "Require an AVX2-capable CPU for Release binaries" OFF)
+
+include(cmake/PyraOptimizations.cmake)
 
 find_package(TIFF REQUIRED)
 find_package(JPEG REQUIRED)
@@ -133,9 +123,9 @@ if(PYR_WITH_CZI)
 	list(APPEND PYR_SOURCES wsi_czi.cpp)
 endif()
 
-add_library(pyra STATIC ${PYR_SOURCES} ${PYR_HEADERS})
-add_library(Pyra::pyra ALIAS pyra)
-target_compile_features(pyra PUBLIC cxx_std_20)
+add_library(pyra_core STATIC ${PYR_SOURCES} ${PYR_HEADERS})
+set_target_properties(pyra_core PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+target_compile_features(pyra_core PUBLIC cxx_std_20)
 set(USE_OPENJPEG ${PYR_WITH_OPENJPEG})
 set(USE_JXL ${PYR_WITH_JXL})
 set(USE_DCMTK ${PYR_WITH_DCMTK})
@@ -144,18 +134,18 @@ configure_file(
 	build_config_generated.h.in
 	${CMAKE_CURRENT_BINARY_DIR}/generated/pyr_build_config_generated.h)
 
-target_include_directories(pyra PUBLIC
+target_include_directories(pyra_core PUBLIC
 	${CMAKE_CURRENT_SOURCE_DIR}
 	${CMAKE_CURRENT_BINARY_DIR}/generated)
-target_link_libraries(pyra PUBLIC TIFF::TIFF JPEG::JPEG Threads::Threads)
+target_link_libraries(pyra_core PUBLIC TIFF::TIFF JPEG::JPEG Threads::Threads)
 
-target_compile_definitions(pyra PUBLIC PYR_USE_GENERATED_BUILD_CONFIG=1)
+target_compile_definitions(pyra_core PUBLIC PYR_USE_GENERATED_BUILD_CONFIG=1)
 
 if(MSVC)
-	target_compile_options(pyra PRIVATE /W4 /permissive- /utf-8)
-	target_compile_definitions(pyra PUBLIC UNICODE _UNICODE NOMINMAX)
+	target_compile_options(pyra_core PRIVATE /W4 /permissive- /utf-8)
+	target_compile_definitions(pyra_core PUBLIC UNICODE _UNICODE NOMINMAX)
 else()
-	target_compile_options(pyra PRIVATE -Wall -Wextra)
+	target_compile_options(pyra_core PRIVATE -Wall -Wextra)
 endif()
 
 if(PYR_WITH_OPENJPEG)
@@ -164,54 +154,83 @@ if(PYR_WITH_OPENJPEG)
 		pkg_check_modules(OPENJPEG QUIET IMPORTED_TARGET libopenjp2)
 	endif()
 	if(OPENJPEG_FOUND)
-		target_link_libraries(pyra PRIVATE PkgConfig::OPENJPEG)
+		target_link_libraries(pyra_core PRIVATE PkgConfig::OPENJPEG)
 	else()
 		find_path(PYRA_OPENJPEG_INCLUDE_DIR openjpeg.h
 			PATH_SUFFIXES openjpeg-2.5 openjpeg-2.4 openjpeg-2.3 REQUIRED)
 		find_library(PYRA_OPENJPEG_LIBRARY NAMES openjp2 openjpeg REQUIRED)
-		target_include_directories(pyra PRIVATE ${PYRA_OPENJPEG_INCLUDE_DIR})
-		target_link_libraries(pyra PRIVATE ${PYRA_OPENJPEG_LIBRARY})
+		target_include_directories(pyra_core PRIVATE ${PYRA_OPENJPEG_INCLUDE_DIR})
+		target_link_libraries(pyra_core PRIVATE ${PYRA_OPENJPEG_LIBRARY})
 	endif()
 endif()
 
 if(PYR_WITH_JXL)
-#
-# libjxl >= 0.9, not any libjxl. The codec calls JxlEncoderDistanceFromQuality
-# and JxlDecoderSetOutputColorProfile, both 0.9.0 (0.8 only declared the
-# latter), and the 0.8 bit-depth API. 0.7, which Ubuntu 24.04's libjxl-dev
-# installs, otherwise passes configure and fails in img_codec.cpp. The solution
-# ships 0.11.0 (WSIA-SOUP).
-	find_package(PkgConfig REQUIRED)
-	pkg_check_modules(JXL QUIET libjxl>=0.9)
-	if(NOT JXL_FOUND)
-		pkg_check_modules(PYR_JXL_ANY QUIET libjxl)
-		if(PYR_JXL_ANY_FOUND)
-			set(PYR_JXL_SEEN "found libjxl ${PYR_JXL_ANY_VERSION}")
-		else()
-			set(PYR_JXL_SEEN "found no libjxl")
-		endif()
-		message(FATAL_ERROR
-			"PYR_WITH_JXL is ON and needs libjxl >= 0.9 (JxlEncoderDistanceFromQuality, "
-			"JxlDecoderSetOutputColorProfile), but pkg-config ${PYR_JXL_SEEN}. Install "
-			"0.9 or newer and point PKG_CONFIG_PATH at its lib/pkgconfig, or configure "
-			"with -DPYR_WITH_JXL=OFF.")
-	endif()
-	target_include_directories(pyra PRIVATE ${JXL_INCLUDE_DIRS})
-	target_link_libraries(pyra PRIVATE ${JXL_LIBRARIES})
+	include(cmake/PyraJxl.cmake)
 endif()
+
+add_library(pyra SHARED pyra_c.cpp include/pyra/pyra.h)
+add_library(Pyra::pyra ALIAS pyra)
+target_compile_features(pyra PRIVATE cxx_std_20)
+target_compile_definitions(pyra PRIVATE PYRA_BUILDING_LIBRARY=1)
+target_include_directories(pyra PUBLIC
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+	$<INSTALL_INTERFACE:include>)
+target_link_libraries(pyra PRIVATE pyra_core)
+set_target_properties(pyra PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1
+	CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+if(UNIX AND NOT APPLE)
+	target_link_options(pyra PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/pyra.exports")
+	set_property(TARGET pyra APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cmake/pyra.exports)
+endif()
+if(MSVC)
+	target_compile_options(pyra PRIVATE /W4 /permissive- /utf-8)
+else()
+	target_compile_options(pyra PRIVATE -Wall -Wextra)
+endif()
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+install(TARGETS pyra EXPORT PyraTargets
+	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+	ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(FILES include/pyra/pyra.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pyra)
+install(FILES license.md DESTINATION ${CMAKE_INSTALL_DATADIR}/Pyra)
+install(EXPORT PyraTargets NAMESPACE Pyra:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Pyra)
+configure_package_config_file(cmake/PyraConfig.cmake.in
+	${CMAKE_CURRENT_BINARY_DIR}/PyraConfig.cmake
+	INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Pyra)
+write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/PyraConfigVersion.cmake
+	VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/PyraConfig.cmake
+	${CMAKE_CURRENT_BINARY_DIR}/PyraConfigVersion.cmake
+	DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Pyra)
 
 include(CTest)
 if(BUILD_TESTING)
+	add_executable(pyra_decode_pool_test tests/decode_pool_test.cpp)
+	target_link_libraries(pyra_decode_pool_test PRIVATE pyra_core)
+	add_test(NAME pyra_decode_pool COMMAND pyra_decode_pool_test)
+	set_tests_properties(pyra_decode_pool PROPERTIES TIMEOUT 20)
 	add_executable(pyra_standalone_test tests/standalone_test.cpp)
-	target_link_libraries(pyra_standalone_test PRIVATE Pyra::pyra)
+	target_link_libraries(pyra_standalone_test PRIVATE pyra_core)
 	file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test_out")
 	add_test(NAME pyra_standalone COMMAND pyra_standalone_test
 		"${CMAKE_CURRENT_BINARY_DIR}/test_out")
+	set_tests_properties(pyra_standalone PROPERTIES FIXTURES_SETUP pyra_slide_fixture)
+	add_executable(pyra_c_api_test tests/c_api_test.cpp)
+	target_link_libraries(pyra_c_api_test PRIVATE Pyra::pyra Threads::Threads)
+	target_compile_definitions(pyra_c_api_test PRIVATE PYRA_TEST_WITH_OPENJPEG=$<BOOL:${PYR_WITH_OPENJPEG}>)
+	add_test(NAME pyra_c_api COMMAND pyra_c_api_test "${CMAKE_CURRENT_BINARY_DIR}/test_out")
+	set_tests_properties(pyra_c_api PROPERTIES FIXTURES_REQUIRED pyra_slide_fixture)
+	add_executable(pyra_c_header_test tests/c_header_test.c)
+	target_link_libraries(pyra_c_header_test PRIVATE Pyra::pyra)
+	add_test(NAME pyra_c_header COMMAND pyra_c_header_test)
 endif()
 
 if(PYR_WITH_DCMTK)
 	find_package(DCMTK REQUIRED)
-	target_link_libraries(pyra PRIVATE DCMTK::DCMTK)
+	target_link_libraries(pyra_core PRIVATE DCMTK::DCMTK)
 endif()
 
 if(PYR_WITH_CZI)
@@ -219,8 +238,8 @@ if(PYR_WITH_CZI)
 # libCZI is LGPL-3.0-or-later: link it dynamically. See build_config.h.
 	find_library(LIBCZI_LIBRARY NAMES CZI libCZI REQUIRED)
 	find_path(LIBCZI_INCLUDE_DIR NAMES libCZI.h REQUIRED)
-	target_include_directories(pyra PRIVATE ${LIBCZI_INCLUDE_DIR})
-	target_link_libraries(pyra PRIVATE ${LIBCZI_LIBRARY})
+	target_include_directories(pyra_core PRIVATE ${LIBCZI_INCLUDE_DIR})
+	target_link_libraries(pyra_core PRIVATE ${LIBCZI_LIBRARY})
 endif()
 
 if(PYRA_BUILD_GUI_TEST)

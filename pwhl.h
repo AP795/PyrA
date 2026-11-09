@@ -174,7 +174,7 @@ template <typename pixeltype> struct Pwhl : PwhlHead {
 	  : PwhlHead{dimensions.w, dimensions.h,
 		line_pitch > 0 ? line_pitch : dimensions.w},
 		prn(nullptr) {
-	buf.resize(l * h, pixeltype{});
+	buf.resize(static_cast<size_t>(l) * static_cast<size_t>(h), pixeltype{});
 	p = buf.data();
 	stamp_pixels();
   }
@@ -188,7 +188,7 @@ template <typename pixeltype> struct Pwhl : PwhlHead {
 	  : PwhlHead{dimensions.w, dimensions.h,
 		line_pitch > 0 ? line_pitch : dimensions.w},
 		prn(nullptr) {
-	buf.resize(l * h);
+	buf.resize(static_cast<size_t>(l) * static_cast<size_t>(h));
 	p = buf.data();
 	stamp_pixels();
   }
