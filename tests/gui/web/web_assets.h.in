@@ -1,0 +1,11 @@
+// PyrA Project, Git ap795/PyrA
+// Copyright (c) 2026 Alexandre Papine
+// SPDX-License-Identifier: MIT
+
+#pragma once
+#include <string_view>
+namespace pyra::web::assets {
+inline constexpr std::string_view html = R"PYRA_ASSET(@PYRA_WEB_HTML@)PYRA_ASSET";
+inline constexpr std::string_view css = R"PYRA_ASSET(@PYRA_WEB_CSS@)PYRA_ASSET";
+inline constexpr std::string_view js = R"PYRA_ASSET(@PYRA_WEB_JS@)PYRA_ASSET";
+}

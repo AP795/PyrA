@@ -1,0 +1,13 @@
+// PyrA Project, Git ap795/PyrA
+// Copyright (c) 2026 Alexandre Papine
+// SPDX-License-Identifier: MIT
+
+#pragma once
+
+#cmakedefine01 USE_DCMTK
+#cmakedefine01 USE_OPENJPEG
+#cmakedefine01 USE_OPENJPH
+#cmakedefine01 USE_JXL
+#cmakedefine01 USE_CZI
+#cmakedefine01 USE_OPENSLIDE
+#define PYRA_VERSION "@PROJECT_VERSION@"
