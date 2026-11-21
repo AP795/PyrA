@@ -121,7 +121,8 @@ public:
 		if (ok)
 			LogPixelMetricInequality( filename_, pyramid );
 //
-// Resolve the selected pixel family, then group its channels into typed ladders.
+// Check the requested pixel family is present (planes of other families are
+// kept), then group the channels into typed ladders.
 		if (ok)
 			ok = ResolveWsiPixelTypes(
 				pyramid, pixel_type_of<pixeltype>::value );

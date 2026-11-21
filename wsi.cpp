@@ -83,14 +83,26 @@ void LogPixelMetricInequality ( const std::string &filename,
 
 bool ResolveWsiPixelTypes ( Ppyr &pyramid, LevelPixelType fallback )
 {
-// Integer monochrome and integer colour opens each retain both of their storage
-// widths. Across families the typed-open contract holds: an RGB request cannot
-// open a gray-only slide.
-	std::erase_if( pyramid.levels, [&] ( const Level &level ) {
-		return level.pixel_type_declared && level.pixel_type != fallback &&
-			!( is_integer_gray( fallback ) && is_integer_gray( level.pixel_type ) ) &&
-			!( is_integer_rgb( fallback ) && is_integer_rgb( level.pixel_type ) );
-	} );
+// The typed-open contract: an RGB request cannot open a gray-only slide. At least
+// one level has to belong to the requested family - integer monochrome and integer
+// colour each span both of their storage widths.
+	const auto in_family = [fallback] ( const Level &level ) {
+		return !level.pixel_type_declared || level.pixel_type == fallback ||
+			( is_integer_gray( fallback ) && is_integer_gray( level.pixel_type ) ) ||
+			( is_integer_rgb( fallback ) && is_integer_rgb( level.pixel_type ) );
+	};
+	if (std::none_of( pyramid.levels.begin(), pyramid.levels.end(), in_family )) {
+		pyramid.levels.clear();
+		pyramid.planes.clear();
+		return false;
+	}
+//
+// Once that holds, a declared level of another family is kept, not dropped: a
+// float32 or gray8 result channel appended to an RGB8 PTF is a plane of its own.
+// Every ladder is typed per plane (rebuild_plane_index), decoding and rendering
+// dispatch on the level's own type, and Generate<T> refuses a level of another
+// type rather than misreading it - so the open's family only names which planes
+// a caller of that one type can render.
 	for (auto &level : pyramid.levels)
 		if (!level.pixel_type_declared)
 			level.pixel_type = fallback;

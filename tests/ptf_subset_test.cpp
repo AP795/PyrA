@@ -9,9 +9,11 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -355,6 +357,112 @@ void test_ptf_reduced_levels_appended_directly ( const std::filesystem::path &di
 }
 
 
+// Whole-image base render of one plane, copied out of whatever the loader returned.
+template <typename Pixel>
+std::vector<Pixel> render_base ( priml::WsiSession &session, priml::Dim2D<int> size,
+	float mpp, const priml::PlaneSel &plane )
+{
+	const auto rect = priml::Rtlbr<float>{ { 0, 0 }, { size.w * mpp, size.h * mpp } };
+	const auto image = session.loader()->Generate<Pixel>( session.pyramid(), nullptr, mpp,
+		rect, &size, plane );
+	if (!image.p || image.w != size.w || image.h != size.h)
+		return {};
+	auto pixels = std::vector<Pixel>{};
+	for (auto y = 0; y < image.h; ++y)
+		pixels.insert( pixels.end(), image.rowp( y ), image.rowp( y ) + image.w );
+	return pixels;
+}
+
+
+// A gray8 channel appended to an RGB8 PTF - the shape a processing result takes -
+// must survive the open as a plane of its own, without disturbing the RGB plane.
+void test_ptf_mixed_family_open ( const std::filesystem::path &directory )
+{
+	std::filesystem::create_directories( directory );
+	const auto path = directory / "mixed.ptf";
+	constexpr auto mpp = 0.5f;
+	const auto size = priml::Dim2D<int>{ 1059, 35 };
+	const auto gray_value = [] ( int x ) { return (uint8_t)( 10 + x / 32 * 7 ); };
+	auto error = std::string{};
+	auto rgb = priml::PtfLevelSpec{};
+	rgb.tags.valid = true;
+	rgb.tags.mpp = mpp;
+	rgb.tags.pixel_type = priml::LevelPixelType::Rgb8;
+	rgb.size = size;
+	rgb.tile = { 32, 32 };
+	rgb.codec = priml::ImgCodec::Jpeg;
+	rgb.encode.quality = priml::kImageDefaultLossyQuality;
+	{
+		auto writer = priml::PtfWriter{};
+		require( writer.open( path.string(), &error ), error );
+		auto fetch = priml::PtfTileFetch<priml::Rgb>( [] ( const priml::Rtlbr<int> &rect,
+			priml::Pwhl<priml::Rgb> *tile ) {
+			for (auto y = 0; y < tile->h; ++y)
+				for (auto x = 0; x < tile->w; ++x)
+					tile->rowp( y )[x] = { (uint8_t)( 200 - rect.tl.x / 32 ), 120, (uint8_t)( 40 + y ) };
+			return true;
+		} );
+		require( writer.add_level( rgb, fetch, &error ) && writer.close( &error ), error );
+	}
+	auto before = std::vector<priml::Rgb>{};
+	{
+		auto session = priml::WsiSession{};
+		require( session.open( path ), "RGB source does not open" );
+		before = render_base<priml::Rgb>( session, size, mpp, {} );
+		require( !before.empty(), "RGB source does not render" );
+	}
+
+	auto gray = rgb;
+	gray.tags.pixel_type = priml::LevelPixelType::Gray8;
+	gray.tags.channel = "DAB";
+	gray.tags.max_pixel_value = 255;
+	{
+		auto writer = priml::PtfWriter{};
+		require( writer.open_append( path.string(), &error ), error );
+		auto fetch = priml::PtfTileFetch<uint8_t>( [&] ( const priml::Rtlbr<int> &rect,
+			priml::Pwhl<uint8_t> *tile ) {
+			for (auto y = 0; y < tile->h; ++y)
+				std::fill_n( tile->rowp( y ), tile->w, gray_value( rect.tl.x ) );
+			return true;
+		} );
+		require( writer.add_level( gray, fetch, &error ) && writer.close( &error ), error );
+	}
+//
+// The reduction reopens the file as gray8, whose first level IFD is RGB.
+	auto stats = priml::PtfWriteStats{};
+	require( priml::append_ptf_reduced_levels( path, { gray }, {}, &stats, &error ), error );
+	require( stats.levels_written == 2, "two gray reductions expected for 1059 px" );
+
+	auto session = priml::WsiSession{};
+	require( session.open( path ), "mixed-family PTF does not open" );
+	const auto &pyramid = session.pyramid();
+	const auto *rgb_plane = priml::find_plane( pyramid, {} );
+	const auto *gray_plane = priml::find_plane( pyramid, { "DAB", 0.0f } );
+	require( pyramid.planes.size() == 2 && rgb_plane && gray_plane,
+		"both planes must survive the open" );
+	require( rgb_plane->pixel_type == priml::LevelPixelType::Rgb8 &&
+		gray_plane->pixel_type == priml::LevelPixelType::Gray8, "plane types were not kept per plane" );
+	require( gray_plane->ladder.size() >= 3, "gray plane lost its reduced levels" );
+
+	const auto after = render_base<priml::Rgb>( session, size, mpp, {} );
+	require( std::equal( after.begin(), after.end(), before.begin(), before.end(),
+		[] ( const priml::Rgb &a, const priml::Rgb &b ) { return a.r == b.r && a.g == b.g && a.b == b.b; } ),
+		"the appended channel changed the RGB plane's pixels" );
+	const auto dab = render_base<uint8_t>( session, size, mpp, { "DAB", 0.0f } );
+	require( dab.size() == (size_t)size.w * size.h, "gray plane does not render with its own type" );
+	for (auto y = 0; y < size.h; ++y)
+		for (auto x = 0; x < size.w; ++x)
+			require( std::abs( dab[(size_t)y * size.w + x] - gray_value( x ) ) <= 2,
+				std::format( "gray pixel ({},{}) is {}, expected {}", x, y,
+					dab[(size_t)y * size.w + x], gray_value( x ) ) );
+	const auto coarse = priml::Dim2D<int>{ 1 + ( size.w - 1 ) / 4, 1 + ( size.h - 1 ) / 4 };
+	require( !render_base<uint8_t>( session, coarse, mpp * 4, { "DAB", 0.0f } ).empty(),
+		"gray plane does not render from its reduced levels" );
+	require( render_base<uint8_t>( session, size, mpp, {} ).empty(),
+		"an RGB plane was rendered as gray8" );
+}
+
+
 void test_ptf_tags_focus_merge_round_trip ( const std::filesystem::path & )
 {
 	auto tags = priml::PtfPlaneTags{};
@@ -417,6 +525,7 @@ bool run_ptf_subset_tests ( const std::filesystem::path &output )
 	test( "test_ptf_subset_sparse_tiles_remain_empty", test_ptf_subset_sparse_tiles_remain_empty );
 	test( "test_ptf_subset_read_failure_cleans_staging", test_ptf_subset_read_failure_cleans_staging );
 	test( "test_ptf_reduced_levels_appended_directly", test_ptf_reduced_levels_appended_directly );
+	test( "test_ptf_mixed_family_open", test_ptf_mixed_family_open );
 	test( "test_ptf_tags_focus_merge_round_trip", test_ptf_tags_focus_merge_round_trip );
 #if USE_OPENJPEG
 	test( "test_ptf_subset_deep_channels", test_ptf_subset_deep_channels );
