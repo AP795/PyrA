@@ -1,0 +1,14 @@
+// PyrA Project, Git ap795/PyrA
+// Copyright (c) 2026 Alexandre Papine
+// SPDX-License-Identifier: MIT
+
+#pragma once
+#define OPJ_HAVE_INTTYPES_H 1
+#define OPJ_PACKAGE_VERSION "2.5.0"
+#define OPJ_HAVE_MALLOC_H 1
+#define OPJ_HAVE_POSIX_MEMALIGN 1
+#define OPJ_HAVE_FSEEKO 1
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112L
+#endif
+#define _FILE_OFFSET_BITS 64

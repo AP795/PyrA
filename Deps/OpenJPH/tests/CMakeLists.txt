@@ -1,0 +1,171 @@
+if (OJPH_LOCAL_TEST)
+  set(FETCHCONTENT_SOURCE_DIR_GOOGLETEST
+      "../../googletest")
+  set(FETCHCONTENT_SOURCE_DIR_JP2K_TEST_CODESTREAMS
+      "../../jp2k_test_codestreams")
+endif()
+
+# Fetch googletest
+include(FetchContent)
+FetchContent_Declare(
+  googletest
+  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+  EXCLUDE_FROM_ALL
+)
+# For Windows: Prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+option(INSTALL_GTEST "Enable installation of googletest." OFF)
+FetchContent_MakeAvailable(googletest)
+
+# Fetch test files
+FetchContent_Declare(
+  jp2k_test_codestreams
+  URL               https://github.com/aous72/jp2k_test_codestreams/archive/refs/heads/main.zip
+  SOURCE_DIR        jp2k_test_codestreams/
+)
+FetchContent_MakeAvailable(jp2k_test_codestreams)
+
+if (OJPH_LOCAL_TEST)
+  # The tests look for the codestreams relative to their runtime directory
+  # (".\\jp2k_test_codestreams\\..."), so copy the Desktop copy there.
+  if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/jp2k_test_codestreams/openjph")
+    execute_process(
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+              "${FETCHCONTENT_SOURCE_DIR_JP2K_TEST_CODESTREAMS}"
+              "${CMAKE_CURRENT_BINARY_DIR}/jp2k_test_codestreams")
+  endif()
+endif()
+
+# create the mse_pae executable
+include(mse_pae.cmake)
+
+# create the compare_files executable
+add_executable(
+  compare_files
+  compare_files.cpp
+)
+
+# configure test executables
+add_executable(
+  test_executables
+  test_executables.cpp
+  test_truncated_decode.cpp
+)
+
+# test_truncated_decode.cpp drives the library directly, rather than through
+# ojph_expand, so that it can test both resilient and non-resilient decoding
+# of the same truncated codestream.
+target_link_libraries(
+  test_executables
+  openjph
+  GTest::gtest_main
+)
+
+# configure QCD/QCC marker tests (library API tests)
+add_executable(
+  test_mixed_coc
+  test_mixed_coc.cpp
+)
+
+target_link_libraries(
+  test_mixed_coc
+  openjph
+  GTest::gtest_main
+)
+
+# configure the NLT (non-linearity point transformation) API tests
+add_executable(
+  test_nlt
+  test_nlt.cpp
+)
+
+target_link_libraries(
+  test_nlt
+  openjph
+  GTest::gtest_main
+)
+
+# configure TLM marker tests (library API tests)
+add_executable(
+  test_tlm
+  test_tlm.cpp
+)
+
+target_link_libraries(
+  test_tlm
+  openjph
+  GTest::gtest_main
+)
+
+# configure the quantization weights tests (library API tests)
+add_executable(
+  test_quant_weights
+  test_quant_weights.cpp
+)
+
+target_link_libraries(
+  test_quant_weights
+  openjph
+  GTest::gtest_main
+)
+
+# configure the tests of signed samples on paths that double a sample
+add_executable(
+  test_signed_shift
+  test_signed_shift.cpp
+)
+
+target_link_libraries(
+  test_signed_shift
+  openjph
+  GTest::gtest_main
+)
+
+include(GoogleTest)
+gtest_add_tests(TARGET test_executables)
+gtest_add_tests(TARGET test_mixed_coc)
+gtest_add_tests(TARGET test_nlt)
+gtest_add_tests(TARGET test_tlm)
+gtest_add_tests(TARGET test_quant_weights)
+gtest_add_tests(TARGET test_signed_shift)
+
+if (MSVC)
+  add_custom_command(TARGET test_executables POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy "../bin/\$(Configuration)/gtest.dll" "./"
+    COMMAND ${CMAKE_COMMAND} -E copy "../bin/\$(Configuration)/gtest_main.dll" "./"
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ojph_compress>" "./"
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ojph_expand>" "./"
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:openjph>" "./"
+  )
+  add_custom_command(TARGET compare_files POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy "./\$(Configuration)/compare_files.exe" "./"
+  )
+  add_custom_command(TARGET mse_pae POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy "./\$(Configuration)/mse_pae.exe" "./"
+  )
+  if (OJPH_ENABLE_TIFF_SUPPORT)
+      file(COPY "${TIFF_INCLUDE_DIR}\\..\\bin\\tiff.dll" DESTINATION "./")
+      file(COPY "${TIFF_INCLUDE_DIR}\\..\\bin\\tiffxx.dll" DESTINATION "./")
+      file(COPY "${TIFF_INCLUDE_DIR}\\..\\bin\\tiffd.dll" DESTINATION "./")
+      file(COPY "${TIFF_INCLUDE_DIR}\\..\\bin\\tiffxxd.dll" DESTINATION "./")
+  endif()
+else()
+  add_custom_command(TARGET test_executables POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ojph_expand>" "./"
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ojph_compress>" "./"
+  )
+  if(EMSCRIPTEN)
+    add_custom_command(TARGET test_executables POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE_DIR:ojph_expand>/ojph_expand.wasm" "./"
+      COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE_DIR:ojph_compress>/ojph_compress.wasm" "./"
+    )
+  endif(EMSCRIPTEN)
+  if(CYGWIN OR MINGW)
+    add_custom_command(TARGET test_executables POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy "../bin/${CMAKE_SHARED_LIBRARY_PREFIX}gtest.dll" "./"
+      COMMAND ${CMAKE_COMMAND} -E copy "../bin/${CMAKE_SHARED_LIBRARY_PREFIX}gtest_main.dll" "./"
+      COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:openjph>" "./"
+    )
+  endif()
+endif(MSVC)

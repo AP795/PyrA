@@ -1,0 +1,104 @@
+# PyrA Project, Git ap795/PyrA
+# Copyright (c) 2026 Alexandre Papine
+# SPDX-License-Identifier: MIT
+
+# GitLab CI for PyrA: Linux builds and headless tests of the two viewers.
+#
+# Every push runs web-linux (Qt-free pyra_web_test) and gui-linux (Qt viewer,
+# offscreen). A tag additionally packs the web viewer, uploads it to the
+# project's Generic Package Registry and creates a GitLab Release.
+# Real-slide, browser and Windows checks stay manual (see the READMEs).
+
+stages:
+  - test
+  - package
+  - release
+
+variables:
+  DEBIAN_FRONTEND: noninteractive
+  PYRA_SDK: "$CI_PROJECT_DIR/out/Deps/linux/install"
+  BUNDLE: "pyra_web_test-linux-x64.tar.gz"
+  PACKAGE_URL: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/pyra_web_test/$CI_COMMIT_TAG/pyra_web_test-linux-x64.tar.gz"
+
+# Both viewers use the same bundled codec SDK on Ubuntu 24.04.
+.linux-build:
+  stage: test
+  image: ubuntu:24.04
+  before_script:
+    - apt-get update -qq
+    - >-
+      apt-get install -y -qq --no-install-recommends
+      build-essential cmake ninja-build python3-numpy $EXTRA_PACKAGES
+    - PYRA_BUILD_JOBS="$(nproc)" bash Deps/build.sh out/Deps/linux
+  script:
+    - |
+      cmake -S . -B out/build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_LIBDIR=lib -DPYRA_ENABLE_AVX2=OFF \
+        -DPYRA_LINUX_SDK="$PYRA_SDK" -DPYR_WITH_OPENJPH=ON -DPYR_WITH_DCMTK=ON \
+        $PYRA_OPTIONS
+    - cmake --build out/build/ci --parallel "$(nproc)"
+    - ctest --test-dir out/build/ci --output-on-failure --output-junit "$CI_PROJECT_DIR/out/junit.xml"
+  artifacts:
+    when: always
+    expire_in: 1 week
+    reports:
+      junit: out/junit.xml
+
+web-linux:
+  extends: .linux-build
+  variables:
+    EXTRA_PACKAGES: "nodejs"
+    PYRA_OPTIONS: "-DPYRA_BUILD_GUI_TEST=OFF -DPYRA_BUILD_WEB_TEST=ON"
+  script:
+    - !reference [.linux-build, script]
+    - cmake --install out/build/ci --prefix "$CI_PROJECT_DIR/out/install/ci"
+    - out/install/ci/bin/pyra_web_test --help
+    - tar -czf "out/$BUNDLE" -C out/install/ci .
+  artifacts:
+    when: always
+    expire_in: 1 week
+    reports:
+      junit: out/junit.xml
+    paths:
+      - "out/$BUNDLE"
+
+gui-linux:
+  extends: .linux-build
+  variables:
+    EXTRA_PACKAGES: "qt6-base-dev"
+    PYRA_OPTIONS: "-DPYRA_BUILD_GUI_TEST=ON -DPYRA_BUILD_WEB_TEST=OFF"
+
+package-web:
+  stage: package
+  image:
+    name: curlimages/curl:8.11.1
+    entrypoint: [""]
+  needs:
+    - job: web-linux
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - 'curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "out/$BUNDLE" "$PACKAGE_URL"'
+
+release-web:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - package-web
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - echo "Creating release $CI_COMMIT_TAG"
+  release:
+    tag_name: "$CI_COMMIT_TAG"
+    name: "PyrA $CI_COMMIT_TAG"
+    description: >-
+      Linux x64 build of the localhost web viewer pyra_web_test (Ubuntu 24.04,
+      GCC 13). Extract and run bin/pyra_web_test --root IMAGE_DIRECTORY.
+      The reader includes the bundled codec libraries and DCMTK.
+    assets:
+      links:
+        - name: "$BUNDLE"
+          url: "$PACKAGE_URL"
+          link_type: package

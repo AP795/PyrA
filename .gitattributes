@@ -1,0 +1,14 @@
+# PyrA Project, Git ap795/PyrA
+# Copyright (c) 2026 Alexandre Papine
+# SPDX-License-Identifier: MIT
+
+* text=auto eol=lf
+
+# Preserve upstream formatting in bundled dependency sources.
+/Deps/OpenJPH/** -whitespace
+/Deps/dcmtk370/** -whitespace
+/Deps/httplib/** -whitespace
+/Deps/jpegturbo3_1_3/** -whitespace
+/Deps/libtiff47/** -whitespace
+/Deps/openjp25/** -whitespace
+/Deps/zlib132/** -whitespace

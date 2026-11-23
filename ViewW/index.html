@@ -1,0 +1,122 @@
+<!--
+PyrA Project, Git ap795/PyrA
+Copyright (c) 2026 Alexandre Papine
+SPDX-License-Identifier: MIT
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="pyra-session" content="PYRA_SESSION_TOKEN">
+	<title>PyrA · Local viewer</title>
+	<link rel="stylesheet" href="/viewer.css">
+	<script src="/viewer.js" defer></script>
+</head>
+<body>
+	<header>
+		<div class="brand"><strong>PyrA</strong><span>LOCAL VIEWER</span></div>
+		<button id="browse">Open image <kbd>Ctrl O</kbd></button>
+		<button id="generate" title="Write a synthetic bright-field z-stack and open it">Generate…</button>
+		<button id="analyse" title="Run Python scripts over the open DICOM slide into a new channel" disabled>Analyse…</button>
+		<div class="separator"></div>
+		<button id="fit" disabled>Fit <kbd>F</kbd></button>
+		<button id="native" disabled>1:1 <kbd>1</kbd></button>
+		<button id="zoom-out" aria-label="Zoom out" disabled>−</button>
+		<button id="zoom-in" aria-label="Zoom in" disabled>+</button>
+		<span id="zoom-label">—</span>
+		<span class="connection" id="connection">Connecting…</span>
+	</header>
+	<main>
+		<section class="stage" id="stage" aria-label="Image viewer">
+			<canvas id="view" tabindex="0" aria-label="Image viewport. Drag to pan; use the wheel to zoom."></canvas>
+			<div class="welcome" id="welcome"><span class="welcome-mark">P</span><h1>A closer look.</h1>
+				<p>Open a local image to explore its detail.</p><button id="welcome-open">Open image</button>
+				<p class="hint">Drag to pan · Scroll to zoom · F to fit · 1 for native pixels</p></div>
+			<div class="stage-badge" id="image-label" hidden></div>
+		</section>
+		<aside>
+			<section class="panel"><h2>Navigator</h2><div class="navigator">
+					<canvas id="minimap" aria-label="Overview. Click or drag to navigate."></canvas>
+					<div id="z-control" hidden><label for="z-slider" id="z-position">Z</label>
+						<input id="z-slider" type="range" min="0" max="0" step="1" value="0" aria-label="Focal plane Z" aria-orientation="vertical" disabled>
+					</div></div>
+				<label for="plane">Channel / Z plane</label><select id="plane" disabled><option>No image open</option></select>
+				<dl><dt>Resolution</dt><dd id="resolution">—</dd><dt>View raster</dt><dd id="raster">—</dd></dl></section>
+			<section class="panel"><h2>Render timing</h2><dl><dt>Native render</dt><dd id="render-time">—</dd>
+				<dt>Request + display</dt><dd id="total-time">—</dd><dt>Transferred</dt><dd id="transfer">—</dd></dl>
+				<p class="hint">Lossless display pixels. Timings include different parts of the rendering path.</p></section>
+			<section class="panel metadata"><h2>Metadata</h2><div id="metadata"><p class="hint">Image properties appear here.</p></div></section>
+		</aside>
+	</main>
+	<footer><span id="status" role="status">Starting local viewer…</span><span id="position"></span></footer>
+	<dialog id="open-dialog">
+		<form id="open-form">
+			<div class="dialog-heading"><h1>Open image</h1><button type="button" id="close-dialog" aria-label="Close">×</button></div>
+			<p class="hint">Choose a file beneath the server’s image directory.</p><p id="root-label" class="root-path"></p>
+			<label for="path">Image path relative to this directory</label><input id="path" name="path" required autocomplete="off" placeholder="slide.svs">
+			<div class="folder-heading"><span id="folder-label">/</span><button type="button" id="parent-folder">Up</button><button type="button" id="make-gallery" title="Lay this folder's TIFF images out as one gallery slide">Make gallery</button></div>
+			<div id="file-list" class="file-list"></div>
+			<div class="options"><label>Reader<select id="backend"><option value="0">PyrA native</option><option value="1" disabled>OpenSlide</option></select></label>
+				<label>TBF · MiB<input id="tbf" type="number" min="1" max="1048576" required></label>
+				<label>PBF · MiB<input id="pbf" type="number" min="0" max="1048576" required></label>
+				<label>Threads<input id="threads" type="number" min="1" max="256" required></label></div>
+			<p id="open-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-dialog">Cancel</button><button id="open-submit" type="submit" class="primary">Open image</button></div>
+		</form>
+	</dialog>
+	<dialog id="generate-dialog">
+		<form id="generate-form">
+			<div class="dialog-heading"><h1>Generate synthetic slide</h1><button type="button" id="generate-close" aria-label="Close">×</button></div>
+			<p class="hint">Writes a bright-field IHC z-stack into <span id="generate-folder" class="root-path">/</span> and opens it. Nucleus size, spacing and positivity describe the tumour nuclei. Fractions are percentages.</p>
+			<div class="options generate-output">
+				<label>Format<select id="generate-format"><option value="ptf">PTF</option>
+					<option value="dicom" id="generate-dicom" disabled>DICOM (.dcm)</option></select></label>
+				<label>File name<input id="generate-name" required autocomplete="off" value="synthetic_cells.ptf"></label>
+			</div>
+			<div class="options generate-options">
+				<label>Width · px<input id="generate-width" type="number" required></label>
+				<label>Height · px<input id="generate-height" type="number" required></label>
+				<label>Tile · px<input id="generate-tile" type="number" required></label>
+				<label>µm / px<input id="generate-mpp" type="number" step="0.001" required></label>
+				<label>Compression<select id="generate-codec"></select></label>
+				<label>Quality<input id="generate-quality" type="number" min="1" max="100" required></label>
+				<label class="check"><input id="generate-lossless" type="checkbox"> Lossless</label></div>
+			<fieldset class="options generate-options"><legend>Focus</legend>
+				<label>Z levels<input id="generate-z" type="number" min="1" required></label>
+				<label>Plane step · µm<input id="generate-z-step" type="number" required></label>
+				<label title="0 % = first plane, 100 % = last plane">Focus at · %<input id="generate-focus" type="number" required></label></fieldset>
+			<fieldset class="options generate-options"><legend>Tissue</legend>
+				<label title="Mean equivalent diameter of the tumour nuclei">Nucleus Ø · µm<input id="generate-nucleus" type="number" required></label>
+				<label title="Mean distance between tumour nuclei inside nests">Spacing · µm<input id="generate-spacing" type="number" required></label>
+				<label title="Expected share of DAB-positive tumour nuclei">Positive · %<input id="generate-positive" type="number" required></label>
+				<label title="Expected share of the tissue area inside tumour nests">Tumour area · %<input id="generate-tumour" type="number" required></label>
+				<label title="Share of the stromal nuclei that are lymphocytes">Lymphocytes · %<input id="generate-lymphocytes" type="number" required></label></fieldset>
+			<progress id="generate-progress" max="1" value="0" hidden></progress>
+			<p id="generate-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" id="generate-cancel">Cancel</button><button id="generate-submit" type="submit" class="primary">Generate</button></div>
+		</form>
+	</dialog>
+	<dialog id="analyse-dialog">
+		<form id="analyse-form">
+			<div class="dialog-heading"><h1>Analyse slide</h1><button type="button" id="analyse-close" aria-label="Close">×</button></div>
+			<p class="hint">Runs Python over <span id="analyse-slide" class="root-path"></span> chunk by chunk and adds the result as a new channel; the slide then reloads in place. Scripts come from <span id="analyse-folder" class="root-path"></span>.</p>
+			<div class="options analyse-options">
+				<label title="Runs once over a coarse image of the whole slide: masks (roi gates the chunks) and parameters">Prepare script<select id="analyse-prepare"></select></label>
+				<label title="Runs on every chunk; returns the new channel's pixels">Process script<select id="analyse-process" required></select></label>
+				<label>New channel<input id="analyse-channel" required autocomplete="off" value="DAB"></label>
+				<label>Output<select id="analyse-type"><option value="gray8">gray8</option><option value="gray16" selected>gray16</option></select></label>
+				<label title="Context pixels sent around each chunk">Halo · px<input id="analyse-halo" type="number" min="0" value="16" required></label>
+				<label title="Python processes working on chunks in parallel">Python workers<input id="analyse-workers" type="number" min="1" required></label></div>
+			<label for="analyse-params" class="analyse-params-label">Parameters · one <code>key=value</code> per line, passed to both scripts</label>
+			<textarea id="analyse-params" rows="3" spellcheck="false" autocomplete="off"></textarea>
+			<fieldset class="analyse-mode"><legend>Apply</legend>
+				<label class="check" title="Run the pyra_process program as a separate process"><input type="radio" name="analyse-mode" id="analyse-mode-cli" value="cli"> by CLI</label>
+				<label class="check" title="Run the bridge inside this viewer's server"><input type="radio" name="analyse-mode" id="analyse-mode-server" value="server" checked> by server</label></fieldset>
+			<progress id="analyse-progress" max="1" value="0" hidden></progress>
+			<p id="analyse-phase" class="hint" role="status"></p>
+			<div id="analyse-result" class="analyse-result" hidden></div>
+			<p id="analyse-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" id="analyse-cancel">Close</button><button id="analyse-submit" type="submit" class="primary">Analyse</button></div>
+		</form>
+	</dialog>
+</body>
+</html>

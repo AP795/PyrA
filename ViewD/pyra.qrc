@@ -1,0 +1,11 @@
+<!--
+PyrA Project, Git ap795/PyrA
+Copyright (c) 2026 Alexandre Papine
+SPDX-License-Identifier: MIT
+-->
+
+<RCC>
+	<qresource prefix="/pyra">
+		<file>pyra.ico</file>
+	</qresource>
+</RCC>

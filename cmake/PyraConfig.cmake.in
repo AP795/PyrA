@@ -1,0 +1,8 @@
+# PyrA Project, Git ap795/PyrA
+# Copyright (c) 2026 Alexandre Papine
+# SPDX-License-Identifier: MIT
+
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/PyraTargets.cmake")
+check_required_components(Pyra)
