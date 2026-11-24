@@ -85,9 +85,79 @@ function changed() {
 	clearTimeout(state.timer);
 	state.timer = setTimeout(() => {
 		if (!state.plane || state.opening) return;
+		if (clientUsable()) { sendClientView(viewRequest()); return; }
+		if (clientDecodes()) { sendClientView(viewRequest(), 'server'); return; }
 		state.pendingRender = viewRequest();
 		pump();
 	}, 35);
+}
+
+// Browser rendering (client_worker.js): the worker holds a WebAssembly copy of
+// PyrA's reader, fetches the stored tiles a view needs and renders it here. The
+// server's /api/render remains the path when the build has no client, before it
+// is ready, and for a plane whose codec the client lacks.
+const client = {worker: null, generation: 0, ready: false, next: 0, shown: 0, failedPlanes: new Set()};
+
+function clientUsable() {
+	return client.ready && client.generation === state.generation && Boolean(state.plane) &&
+		!client.failedPlanes.has(state.plane.index);
+}
+
+// The client cannot render this plane but can decode the server's frame of it,
+// which then travels as lossless HTJ2K instead of raw RGBA.
+function clientDecodes() {
+	return client.ready && client.generation === state.generation && Boolean(state.plane);
+}
+
+function startClient() {
+	client.ready = false;
+	client.failedPlanes.clear();
+	if (!state.config?.client || typeof Worker === 'undefined') return;
+	if (!client.worker) {
+		client.worker = new Worker('client_worker.js');
+		client.worker.onmessage = event => clientMessage(event.data);
+	}
+	client.generation = state.generation;
+	client.worker.postMessage({type: 'open', token, generation: state.generation, cacheMiB: state.config.client_cache_mib,
+		threads: navigator.hardwareConcurrency || 1});
+}
+
+// `type` 'render' renders in the browser; 'server' fetches the server's frame.
+function sendClientView(request, type = 'render') {
+	request.id = ++client.next;
+	request.started = performance.now();
+	client.worker.postMessage({type, request});
+}
+
+async function clientMessage(message) {
+	if (message.generation !== client.generation) return;
+	if (message.type === 'opened') {
+		client.ready = true;
+		changed();
+	} else if (message.type === 'error') {
+		if (message.plane >= 0) client.failedPlanes.add(message.plane);
+		else client.ready = false;
+		status(`Browser rendering unavailable (${message.message}); the server renders instead.`);
+		changed();
+	} else if (message.type === 'frame') {
+		const request = message.request;
+// Any frame of this plane newer than the one shown helps: draw() places a frame
+// by its own rectangle, so one from a slightly older view still lands right.
+		if (request.epoch !== state.epoch || request.id < client.shown) return;
+		const bitmap = await createImageBitmap(new ImageData(new Uint8ClampedArray(message.pixels), message.width,
+			message.height), {colorSpaceConversion: 'none'});
+		if (request.epoch !== state.epoch || request.id < client.shown) { bitmap.close(); return; }
+		client.shown = request.id;
+		state.frame?.bitmap.close();
+		state.frame = {bitmap, request};
+		draw();
+		$('render-time').textContent = `${message.ms.toFixed(2)} ms (${message.server ? 'server' : 'browser'})`;
+		$('total-time').textContent = `${(performance.now() - request.started).toFixed(2)} ms`;
+		$('transfer').textContent = message.server ? `${(message.bytes / 1048576).toFixed(2)} MiB (HTJ2K frame)`
+			: `${(message.bytes / 1048576).toFixed(2)} MiB in ${message.tiles} tiles`;
+		$('raster').textContent = `${message.width} × ${message.height}`;
+		status(message.complete ? state.notice || 'Ready · Drag to pan, scroll to zoom' : 'Loading tiles…');
+	}
 }
 
 function fit() {
@@ -221,6 +291,7 @@ async function doOpen(task) {
 	if (task.epoch !== state.epoch) return;
 	state.image = image;
 	state.generation = image.generation;
+	startClient();
 	$('plane').replaceChildren(...image.planes.map(plane => {
 		const option = document.createElement('option');
 		option.value = plane.index;

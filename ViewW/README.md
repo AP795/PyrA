@@ -100,6 +100,16 @@ tests. Pass a build directory as the script's only argument to use a
 different output location. See [codec coverage](../Deps/README.md).
 To open a DICOM slide, select one of its `.dcm` files.
 
+To embed the [browser client](#browser-rendering), set `PYRA_WEB_CLIENT_DIR` to
+a folder holding `pyra_client.js` and `pyra_client.wasm`:
+
+```sh
+PYRA_WEB_CLIENT_DIR=/path/to/client bash ViewW/build_linux.sh
+```
+
+The two files need no Emscripten on this machine: they can be copied from any
+build of the client (see [Building the client](#building-the-client)).
+
 The default image directory is `tst_in/` in the checkout used to build the
 viewer, independent of its working directory. Set `PYRA_VIEWER_IMAGE_DIRECTORY`
 in CMake to change this default or use `--root IMAGE_DIRECTORY` at launch.
@@ -124,6 +134,99 @@ directory and accepts relative paths, without uploading or copying slides.
 Symlinks and parent paths resolving outside that root are rejected. This is
 a single-viewer process: tabs share its one active image/context.
 
+## Browser rendering
+
+When the viewer is built with the browser client (below), views are rendered in
+the browser. The server sends each tile as it is stored in the slide, unchanged;
+the browser decodes and renders it with PyrA's own reader, compiled to
+WebAssembly, so the pixels are the server's. The server no longer decodes for
+views, and a revisited area costs no transfer.
+
+- `GET /api/geometry?generation=N` returns the slide's geometry (levels and tile
+  rectangles), from which the browser builds its copy of the slide
+  (`pyra_open_remote`).
+- `GET /api/raw-tile?generation=N&level=L&tile=T` returns one stored tile
+  (`pyra_read_encoded_tile`). JPEG tables, NDPI headers and the CZI sub-block
+  descriptor are included, so each tile decodes on its own. Synthetic coarse
+  levels, which exist only in the server's memory, are sent as losslessly
+  encoded 512-pixel tiles. Both URLs name the slide generation and are cached as
+  immutable; a stale generation returns 410.
+- A Web Worker (`client_worker.js`) runs the client. For each view it renders
+  what it holds and shows it, fetches the missing tiles (six at a time, a
+  browser's connections per host), and renders again until the view is complete.
+- The client keeps 256 MiB in each of its compressed and decoded caches
+  (`kClientCacheMiB`). A view whose tiles exceed this cannot complete, so the
+  cache must hold one view; uncompressed CZI sub-blocks are the large case.
+- The client decodes on up to 8 threads (`PYRA_CLIENT_MAX_THREADS` in
+  `wasm/CMakeLists.txt`, started with the module), at most the browser's
+  `navigator.hardwareConcurrency`. Threads share WebAssembly memory, which
+  browsers allow only on a cross-origin isolated page: the server sends
+  `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp` on every response, and all
+  resources are same-origin. A page that is not isolated (a proxy dropping the
+  headers) or not a secure context (plain http to a remote host) gets no client
+  and is rendered by the server.
+- For a plane whose codec the client lacks (JPEG XL), the server renders the
+  view and sends it as a lossless HTJ2K RGB frame (`/api/render?encoding=htj2k`,
+  header `X-Pyra-Encoding`), which the client decodes. Without the client, or
+  before it is ready, the view comes from `/api/render` as raw RGBA, as before.
+  The minimap overview always does.
+
+Measured on this sequence (9 views of 1920x1080; CMU-1 JPEG and JPEG 2000,
+3DHISTECH DICOM, NDPI, two PTF): the client's first pass transfers 1.3-9.4 MiB
+where server rendering sent 71.2 MiB, and a repeated pass transfers nothing.
+Eight decode threads cut client render time by 1.7-3.5x against one (JPEG 2000
+4.6 s to 1.3 s). OpenJPEG runs on the calling thread in WebAssembly
+(`kOpjCodecThreads`): its per-tile thread pool needed a Web Worker started by the
+main thread for every tile and had held the speedup to 1.4x. HTJ2K frames are 3.7-21x smaller than raw RGBA and cost the
+server 41-69 ms of encoding each, so on loopback raw frames arrive sooner; the
+compressed frame pays off once the link is slower than about 100 MB/s.
+
+The client decodes everything the server decodes except JPEG XL (not yet built
+for WebAssembly) and DICOM-specific codecs it does not bundle. Checked against
+the server's own `/api/render`: identical for SVS JPEG and JPEG 2000, DICOM,
+NDPI and PTF; lossy HTJ2K differs by one code value in a few samples per
+million, the rounding of OpenJPH's float wavelet in WebAssembly versus x64.
+
+### Building the client
+
+The client is a separate Emscripten build of this tree (Windows paths shown;
+any host with emsdk works):
+
+```powershell
+. C:\c\emsdk\emsdk_env.ps1
+emcmake cmake -G Ninja -S Deps -B ../out/Pyra/build/wasm-deps -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=../out/Pyra/build/wasm-deps/install
+cmake --build ../out/Pyra/build/wasm-deps
+cmake --install ../out/Pyra/build/wasm-deps
+emcmake cmake -G Ninja -S . -B ../out/Pyra/build/wasm -DCMAKE_BUILD_TYPE=Release -DPYRA_LINUX_SDK=../out/Pyra/build/wasm-deps/install -DPYR_WITH_OPENJPH=ON -DPYR_WITH_JXL=OFF -DPYR_WITH_DCMTK=OFF -DPYR_WITH_CZI=OFF -DPYRA_WITH_OPENSLIDE=OFF -DPYRA_BUILD_BRIDGE=OFF -DPYRA_BUILD_WEB_TEST=OFF -DPYRA_BUILD_GUI_TEST=OFF -DBUILD_TESTING=OFF -DPYRA_ENABLE_IPO=OFF -DPYRA_ENABLE_AVX2=OFF
+cmake --build ../out/Pyra/build/wasm --target pyra_client
+```
+
+It was developed with emsdk 4.0.20. Then configure the native viewer with
+`-DPYRA_WEB_CLIENT_DIR=<wasm build>/ViewW/wasm`: the server embeds
+`pyra_client.js` and `pyra_client.wasm` and stays one self-contained executable.
+The embedding needs only CMake, so the pair can be built once and copied to a
+machine without Emscripten. Copy both files together, since each `.js` loads only
+its own `.wasm`. Rebuild them after changing what the client contains:
+- the geometry and tile formats (`Core/remote_pyramid.*`, the CZI sub-block
+  descriptor, synthetic-tile encodings);
+- the exports `client_worker.js` calls;
+- decoding or rendering code.
+
+A geometry version mismatch makes the client refuse the slide, and the server
+renders instead.
+`node ViewW/wasm/pyra_client_test.cjs <wasm build>/ViewW/wasm/pyra_client.js
+http://127.0.0.1:PORT SLIDE...` compares the client's renders with a running
+server's.
+
+### Behind a reverse proxy
+
+The server accepts requests only for its loopback address. Behind a proxy such
+as Caddy, pass `--public-origin https://host[:port]`: requests carrying that
+Host and Origin are accepted as well, and the per-run token is still required.
+The content security policy allows WebAssembly (`'wasm-unsafe-eval'`) and
+same-origin workers.
+
 ## Rendering and limits
 
 Rendering runs on HTTP worker threads, separate from browser interaction.
@@ -131,7 +234,13 @@ The UI retains only the latest pending view and allows one native request at
 a time. The server serializes open/render access, bounds its HTTP worker
 queue, and checks an image generation on each render. The browser discards
 results after view/plane/image changes. An interrupted HTTP request cannot
-cancel an already-running native render.
+cancel an already-running native render. Tile and geometry requests wait for the
+slide instead of being refused, and the server runs 32 HTTP workers with a 5 s
+keep-alive (`kHttpWorkerThreads`, `kKeepAliveSeconds`): cpp-httplib holds a
+worker per open connection, so a request queued behind idle connections waits
+for the keep-alive timeout. A browser keeps six connections per host, but other
+clients open more while idle ones linger (Node's fetch: 55 s for a pass that
+takes 1.4 s with 32 workers).
 
 Each response contains top-down RGBA8 display pixels, without image
 compression. Native RGB8/Gray8 samples keep their values; wider samples are

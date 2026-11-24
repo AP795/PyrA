@@ -4,6 +4,7 @@
 
 #include "img_codec.h"
 
+#include "img_czi.h"
 #include "img_htj2k.h"
 #include "img_tiff.h"
 #include "pyr_rt.h"
@@ -54,30 +55,6 @@ extern "C" {
 #endif
 #endif
 
-#if USE_CZI
-//
-// libCZI's public headers put std::string / std::map / std::function members in
-// dll-exported classes (C4251) and narrow an int to its enum's underlying type
-// (C4244). Both are inside the library's own interface and not actionable here,
-// and at /W4 they were some 6000 lines of build output per full rebuild - enough
-// to bury our own warnings, which is how four real ones went unnoticed.
-#ifdef _MSC_VER
-#pragma warning( push )
-#pragma warning( disable : 4251 4244 4458 4864 )
-#endif
-#include <libCZI.h>
-#ifdef _MSC_VER
-#pragma warning( pop )
-#endif
-#if PYR_MSVC_AUTOLINK
- #ifdef _DEBUG
-  #pragma comment(lib, "libCZId.lib")
- #else
-  #pragma comment(lib, "libCZI.lib")
- #endif
-#endif
-#endif
-
 namespace priml {
 
 const char *const img_codec_names[] = {
@@ -103,9 +80,6 @@ const char *img_codec_unavailable_reason ( ImgCodec codec ) noexcept
 #endif
 #if !USE_OPENJPEG
 	case ImgCodec::Jp2k: return "Unsupported compression: JPEG 2000 (this build has PYR_WITH_OPENJPEG=OFF).";
-#endif
-#if !USE_CZI
-	case ImgCodec::CziSubBlock: return "Unsupported compression: CZI sub-block (this build has PYR_WITH_CZI=OFF).";
 #endif
 	case ImgCodec::JpegLs: return "Unsupported compression: JPEG-LS (no JPEG-LS decoder is built into Pyra).";
 	default: return nullptr;
@@ -1153,6 +1127,21 @@ static OPJ_BOOL OpjSeek ( OPJ_OFF_T pos, void *user )
 static void OpjWarn ( const char *msg, void *user );
 static void OpjEncodeError ( const char *msg, void *user );
 
+// OpenJPEG's own worker threads per codec. 0 runs the codec on the calling
+// thread; 1 does NOT mean that - it creates a one-thread pool, i.e. a thread is
+// created and joined for every tile.
+//
+// In WebAssembly a thread is a Web Worker the main thread must start: the
+// per-tile pool left the browser client's decode threads waiting in
+// opj_thread_pool_create, and 0 made a 589-tile batch 4.9x faster on 8 threads.
+// Natively the per-tile thread costs nothing measurable - 1 measured ~3% faster
+// on CMU-1 JPEG 2000 server renders (3 runs each) - so it stays.
+#if defined( __EMSCRIPTEN__ )
+constexpr OPJ_UINT32 kOpjCodecThreads = 0;
+#else
+constexpr OPJ_UINT32 kOpjCodecThreads = 1;
+#endif
+
 
 static bool ReadJp2kInfo ( const uint8_t *bf, size_t len, ImgCodecInfo *out,
 	std::string *error )
@@ -1170,7 +1159,7 @@ static bool ReadJp2kInfo ( const uint8_t *bf, size_t len, ImgCodecInfo *out,
 		opj_destroy_codec( codec );
 		return SetCodecError( error, "opj_setup_decoder failed" );
 	}
-	opj_codec_set_threads( codec, 1 );
+	opj_codec_set_threads( codec, kOpjCodecThreads );
 
 	auto src = OpjMemSrc{ bf, static_cast<OPJ_SIZE_T>(len), 0 };
 	auto *stream = opj_stream_default_create( OPJ_TRUE );
@@ -1410,7 +1399,7 @@ static bool EncodeJp2k ( const Pwhl<pixeltype> &source,
 		auto messages = OpjEncodeMessages{};
 		opj_set_error_handler( codec, OpjEncodeError, &messages );
 		opj_set_warning_handler( codec, OpjWarn, nullptr );
-		opj_codec_set_threads( codec, 1 );
+		opj_codec_set_threads( codec, kOpjCodecThreads );
 		if (!opj_setup_encoder( codec, &params, image )) {
 			opj_destroy_codec( codec );
 			opj_image_destroy( image );
@@ -1507,7 +1496,7 @@ static bool DecodeJp2k ( const uint8_t *bf, size_t len, ColorHint hint,
 	}
 // Tiles are already decoded in parallel by the caller's pool; letting OpenJPEG
 // spawn its own threads per tile would oversubscribe every core.
-	opj_codec_set_threads( codec, 1 );
+	opj_codec_set_threads( codec, kOpjCodecThreads );
 
 	auto src = OpjMemSrc{ bf, (OPJ_SIZE_T)len, 0 };
 	auto *stream = opj_stream_default_create( OPJ_TRUE );
@@ -1649,19 +1638,16 @@ static bool DecodeJp2k ( const uint8_t *bf, size_t len, ColorHint hint,
 #endif // USE_OPENJPEG
 
 
-#if USE_CZI
-
 // --- CZI sub-block ---
 //
-// The payload is whatever libCZI stored: JPEG XR, one of the two zstd flavours,
-// a JPEG, or nothing at all. libCZI's own decoders are used rather than adding a
-// JPEG XR implementation here; ISite::GetDecoder is documented as safe to call
-// concurrently, which is what lets these tiles ride the shared decode pool
-// instead of being decoded serially while loading.
+// The payload is whatever the CZI file stored: JPEG XR, one of the two zstd
+// flavours, a JPEG, or nothing at all. The decoders are img_czi's (bundled
+// jxrlib and zstd), not libCZI's, so a build without the CZI loader - a remote
+// client - decodes the tiles a server's loader wrapped.
 
 struct CziTileHeader {
-	libCZI::CompressionMode compression = libCZI::CompressionMode::Invalid;
-	libCZI::PixelType pixel_type = libCZI::PixelType::Invalid;
+	CziCompression compression = CziCompression::Uncompressed;
+	CziPixelType pixel_type = CziPixelType::Gray8;
 	int w = 0;
 	int h = 0;
 	float black = 0.0f;
@@ -1682,8 +1668,8 @@ static bool ParseCziTileHeader ( const uint8_t *bf, size_t len,
 	if (len < (size_t)kCziTileHeaderBytes || bf[4] != kCziTileHeaderVersion)
 		return false;
 
-	out->compression = (libCZI::CompressionMode)bf[5];
-	out->pixel_type = (libCZI::PixelType)bf[6];
+	out->compression = (CziCompression)bf[5];
+	out->pixel_type = (CziPixelType)bf[6];
 	out->w = (int)ReadU32Le( bf + 8 );
 	out->h = (int)ReadU32Le( bf + 12 );
 	auto black = ReadU32Le( bf + 16 );
@@ -1709,16 +1695,14 @@ static uint16_t ApplyGrayWindow ( uint16_t value, float black, float white )
 }
 
 
-// Copy CZI pixels into the destination, converting colour order and grey depth.
-//
-// Takes a bare pointer rather than an IBitmapData so the uncompressed case can
-// be served straight from the sub-block payload: libCZI has no public way to
-// wrap an existing buffer in a bitmap, and decoding is not needed to read it.
+// Copy packed CZI samples into the destination, converting colour order and
+// grey depth.
 template <typename pixeltype>
 static bool CopyCziPixels ( const uint8_t *base, size_t src_stride,
-	libCZI::PixelType type, int w, int h, const CziTileHeader &header,
-	const TileDst<pixeltype> &dst )
+	const CziTileHeader &header, const TileDst<pixeltype> &dst )
 {
+	const auto w = header.w;
+	const auto h = header.h;
 	if (!base || w <= 0 || h <= 0)
 		return false;
 
@@ -1730,14 +1714,14 @@ static bool CopyCziPixels ( const uint8_t *base, size_t src_stride,
 	for (auto y = 0; y < h; ++y) {
 		const auto *src = base + (size_t)y * src_stride;
 		auto *row = out + (size_t)y * (size_t)stride;
-		switch (type) {
-			case libCZI::PixelType::Bgr24:
+		switch (header.pixel_type) {
+			case CziPixelType::Bgr24:
 //
 // CZI stores blue first; every other loader in the tree hands us RGB.
 				for (auto x = 0; x < w; ++x, src += 3)
 					row[x] = PixelFromRgbBytes<pixeltype>( src[2], src[1], src[0] );
 				break;
-			case libCZI::PixelType::Bgr48:
+			case CziPixelType::Bgr48:
 				for (auto x = 0; x < w; ++x, src += 6) {
 					auto r = (uint16_t)( src[4] | ( src[5] << 8 ) );
 					auto g = (uint16_t)( src[2] | ( src[3] << 8 ) );
@@ -1750,20 +1734,20 @@ static bool CopyCziPixels ( const uint8_t *base, size_t src_stride,
 							(uint8_t)( b >> 8 ) );
 				}
 				break;
-			case libCZI::PixelType::Gray8:
+			case CziPixelType::Gray8:
 				for (auto x = 0; x < w; ++x)
 					row[x] = PixelFromGrayWord<pixeltype>( ApplyGrayWindow(
 						(uint16_t)( src[x] << 8 | src[x] ),
 						header.black, header.white ) );
 				break;
-			case libCZI::PixelType::Gray16:
+			case CziPixelType::Gray16:
 				for (auto x = 0; x < w; ++x) {
 					auto v = (uint16_t)( src[x * 2] | ( src[x * 2 + 1] << 8 ) );
 					row[x] = PixelFromGrayWord<pixeltype>(
 						ApplyGrayWindow( v, header.black, header.white ) );
 				}
 				break;
-			case libCZI::PixelType::Gray32Float:
+			case CziPixelType::Gray32Float:
 				for (auto x = 0; x < w; ++x) {
 					auto v = 0.0f;
 					std::memcpy( &v, src + (size_t)x * 4, sizeof( float ) );
@@ -1784,95 +1768,52 @@ static bool DecodeCziSubBlock ( const uint8_t *bf, size_t len,
 	const TileDst<pixeltype> &dst, TileDiag &diag )
 {
 	auto header = CziTileHeader{};
-	if (!ParseCziTileHeader( bf, len, &header )) {
+	if (!ParseCziTileHeader( bf, len, &header ) || czi_pixel_bytes( header.pixel_type ) == 0) {
 		LogDecodeFailure( ImgCodec::CziSubBlock, diag, bf, len,
-			"malformed CZI tile descriptor" );
+			"malformed CZI tile descriptor or unsupported pixel type" );
 		return false;
 	}
 
 	const auto *payload = bf + kCziTileHeaderBytes;
-	auto payload_len = len - (size_t)kCziTileHeaderBytes;
-
-	try {
-		auto bitmap = std::shared_ptr<libCZI::IBitmapData>{};
-		switch (header.compression) {
-			case libCZI::CompressionMode::UnCompressed: {
+	const auto payload_len = len - (size_t)kCziTileHeaderBytes;
+	const auto stride = czi_pixel_bytes( header.pixel_type ) * (size_t)header.w;
+	auto decoded = std::vector<uint8_t>{};
+	auto error = std::string{};
+	switch (header.compression) {
+		case CziCompression::Uncompressed:
 //
 // Already pixels - read them straight out of the payload. The stride is whatever
 // the stored rows actually occupy, which for a sub-block is the packed width.
-				auto bpp = (size_t)libCZI::Utils::GetBytesPerPixel(
-					header.pixel_type );
-				auto stride = bpp * (size_t)header.w;
-				if (bpp == 0 || payload_len < stride * (size_t)header.h) {
-					LogDecodeFailure( ImgCodec::CziSubBlock, diag, bf, len,
-						"uncompressed CZI sub-block is short" );
-					return false;
-				}
-				return CopyCziPixels( payload, stride, header.pixel_type,
-					header.w, header.h, header, dst );
-			}
-			case libCZI::CompressionMode::JpgXr:
-			case libCZI::CompressionMode::Zstd0:
-			case libCZI::CompressionMode::Zstd1: {
-				auto type = header.compression == libCZI::CompressionMode::JpgXr
-					? libCZI::ImageDecoderType::JPXR_JxrLib
-					: ( header.compression == libCZI::CompressionMode::Zstd0
-						? libCZI::ImageDecoderType::ZStd0
-						: libCZI::ImageDecoderType::ZStd1 );
-//
-// The public way to reach a decoder: libCZI::GetSite() is an internal header.
-// Default is the bundled JXRLib, which is what the /MD rebuild links; the
-// WithWICDecoder alternative would hand JPEG XR to Windows Imaging Component.
-				auto *site = libCZI::GetDefaultSiteObject(
-					libCZI::SiteObjectType::Default );
-				auto decoder = site
-					? site->GetDecoder( type, nullptr )
-					: std::shared_ptr<libCZI::IDecoder>{};
-				if (!decoder) {
-					LogDecodeFailure( ImgCodec::CziSubBlock, diag, bf, len,
-						"libCZI has no decoder for this compression mode" );
-					return false;
-				}
-				bitmap = decoder->Decode( payload, payload_len,
-					header.pixel_type, (uint32_t)header.w, (uint32_t)header.h );
-				break;
-			}
-			case libCZI::CompressionMode::Jpg:
-				return DecodeJpeg( payload, payload_len, ColorHint::FromStream, dst, diag );
-			default:
+			if (payload_len < stride * (size_t)header.h) {
 				LogDecodeFailure( ImgCodec::CziSubBlock, diag, bf, len,
-					"unsupported CZI compression mode" );
+					"uncompressed CZI sub-block is short" );
 				return false;
-		}
-
-		if (!bitmap) {
+			}
+			return CopyCziPixels( payload, stride, header, dst );
+		case CziCompression::Jpeg:
+			return DecodeJpeg( payload, payload_len, ColorHint::FromStream, dst, diag );
+		case CziCompression::JpegXr:
+			if (!czi_decode_jpeg_xr( payload, payload_len, header.pixel_type, header.w, header.h, &decoded, &error )) {
+				LogDecodeFailure( ImgCodec::CziSubBlock, diag, bf, len, error.c_str() );
+				return false;
+			}
+			break;
+		case CziCompression::Zstd0:
+		case CziCompression::Zstd1:
+			if (!czi_decode_zstd( payload, payload_len, header.compression == CziCompression::Zstd1,
+				header.pixel_type, header.w, header.h, &decoded, &error ))
+			{
+				LogDecodeFailure( ImgCodec::CziSubBlock, diag, bf, len, error.c_str() );
+				return false;
+			}
+			break;
+		default:
 			LogDecodeFailure( ImgCodec::CziSubBlock, diag, bf, len,
-				"CZI sub-block produced no bitmap" );
+				"unsupported CZI compression mode" );
 			return false;
-		}
-
-		auto size = bitmap->GetSize();
-		auto locker = libCZI::ScopedBitmapLockerSP{ bitmap };
-		if (!CopyCziPixels( (const uint8_t *)locker.ptrDataRoi,
-				(size_t)locker.stride, bitmap->GetPixelType(),
-				(int)size.w, (int)size.h, header, dst ))
-		{
-			LogDecodeFailure( ImgCodec::CziSubBlock, diag, bf, len,
-				"unsupported CZI pixel type" );
-			return false;
-		}
-		return true;
 	}
-	catch (const std::exception &e) {
-//
-// libCZI reports every failure by exception, and one bad tile must not take the
-// render down with it.
-		LogDecodeFailure( ImgCodec::CziSubBlock, diag, bf, len, e.what() );
-		return false;
-	}
+	return CopyCziPixels( decoded.data(), stride, header, dst );
 }
-
-#endif // USE_CZI
 
 
 // --- raw samples ---
@@ -1884,6 +1825,7 @@ size_t raw_sample_pixel_bytes ( RawSampleLayout layout ) noexcept
 		case RawSampleLayout::Gray16: return 2;
 		case RawSampleLayout::Rgb8: return 3;
 		case RawSampleLayout::Rgb16: return 6;
+		case RawSampleLayout::Float32: return 4;
 	}
 	return 0;
 }
@@ -1927,6 +1869,11 @@ static bool DecodeRawSamples ( const uint8_t *bf, size_t len,
 			"raw-sample payload is short or has an unknown layout" );
 		return false;
 	}
+	if (layout == RawSampleLayout::Float32 && !std::is_same_v<pixeltype, float>) {
+		LogDecodeFailure( ImgCodec::RawSamples, diag, bf, len,
+			"float raw samples decode only to a float plane" );
+		return false;
+	}
 
 	auto stride = 0;
 	auto *out = dst.reserve( (int)w, (int)h, stride );
@@ -1960,6 +1907,10 @@ static bool DecodeRawSamples ( const uint8_t *bf, size_t len,
 					std::memcpy( rgb, src, sizeof( rgb ) );
 					row[x] = PixelFromRgbWords<pixeltype>( rgb[0], rgb[1], rgb[2] );
 				}
+				break;
+			case RawSampleLayout::Float32:
+				if constexpr (std::is_same_v<pixeltype, float>)
+					std::memcpy( row, src, row_bytes );
 				break;
 		}
 	}
@@ -2016,11 +1967,7 @@ bool decode_tile ( const uint8_t *bf, size_t len, ColorHint hint,
 #endif
 			break;
 		case ImgCodec::CziSubBlock:
-#if USE_CZI
 			ok = DecodeCziSubBlock( bf, len, dst, diag );
-#else
-			LogDecodeFailure( codec, diag, bf, len, "built without USE_CZI" );
-#endif
 			break;
 		case ImgCodec::RawSamples:
 			ok = DecodeRawSamples( bf, len, dst, diag );

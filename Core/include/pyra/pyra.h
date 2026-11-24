@@ -341,6 +341,50 @@ PYRA_API pyra_status pyra_get_image ( pyra_wsi *wsi,
 	const pyra_image_request *request, const pyra_image_buffer *destination,
 	pyra_error *error );
 
+// Remote ("sister") slides. A server holding the file describes an open slide
+// once with pyra_get_geometry and serves each tile's stored bytes unchanged with
+// pyra_read_encoded_tile. A client without the file opens the description with
+// pyra_open_remote and renders with pyra_get_image as usual: tiles it does not
+// hold yet are rendered as background, the call returns INCOMPLETE, and
+// pyra_take_missing_tiles lists them. After pyra_put_encoded_tile has stored
+// their bytes, the same request renders exactly what the server would render.
+// Level and tile indices are those of the geometry and are opaque to the caller.
+// Synthetic coarse levels the server computed are served as losslessly encoded
+// virtual tiles. Remote slides are native-only and not shared between handles.
+typedef struct pyra_tile_id {
+	uint32_t level_index;
+	uint32_t tile_index;
+} pyra_tile_id;
+
+// Receives bytes the library owns for the duration of the call.
+typedef void ( *pyra_bytes_fn )( void *user, const void *data, size_t size );
+
+PYRA_API pyra_status pyra_get_geometry ( pyra_wsi *wsi, pyra_bytes_fn sink,
+	void *user, pyra_error *error );
+// A sparse (absent) tile delivers zero bytes.
+PYRA_API pyra_status pyra_read_encoded_tile ( pyra_wsi *wsi, uint32_t level_index,
+	uint32_t tile_index, pyra_bytes_fn sink, void *user, pyra_error *error );
+PYRA_API pyra_status pyra_open_remote ( pyra_context *context, const void *geometry,
+	size_t size, pyra_wsi **wsi, pyra_error *error );
+PYRA_API pyra_status pyra_put_encoded_tile ( pyra_wsi *wsi, uint32_t level_index,
+	uint32_t tile_index, const void *data, size_t size, pyra_error *error );
+// Writes up to `capacity` tiles that renders needed and that hold no bytes yet,
+// each once, and removes them from the queue; `count` receives how many.
+PYRA_API pyra_status pyra_take_missing_tiles ( pyra_wsi *wsi, pyra_tile_id *tiles,
+	size_t capacity, size_t *count, pyra_error *error );
+
+// Standalone images. pyra_encode_image encodes a width x height RGB8, RGB16,
+// GRAY8 or GRAY16 raster with `codec` (quality 1..100 lossy, or
+// PYRA_QUALITY_LOSSLESS where the codec has a lossless mode) and delivers the
+// codestream to `sink`. pyra_decode_image decodes any codestream the reader
+// decodes into `destination`'s pixel format; with a null destination it only
+// reports the size, otherwise the destination must hold exactly that size.
+PYRA_API pyra_status pyra_encode_image ( const pyra_image_buffer *source, uint32_t width,
+	uint32_t height, pyra_codec codec, uint32_t quality, pyra_bytes_fn sink, void *user,
+	pyra_error *error );
+PYRA_API pyra_status pyra_decode_image ( const void *data, size_t size,
+	const pyra_image_buffer *destination, uint32_t *width, uint32_t *height, pyra_error *error );
+
 // Operations on live handles are thread-safe and serialized within each context.
 // Independent contexts may run concurrently. Cache budgets cover retained tile
 // pixel/byte storage, not metadata, synthetic rasters, codec/render temporaries,

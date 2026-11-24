@@ -424,40 +424,47 @@ bool GalleryLoader::LoadTile ( Ppyr &pyramid, int level_no,
 	int tile_no, unsigned worker_idx )
 {
 	return this->LoadCompressedTile( pyramid, level_no, tile_no, worker_idx,
-		[this] ( auto &level, auto &tile, uint8_t *dest, size_t &pos, unsigned /*worker*/ ) {
-			const auto &members = state_->manifest.members;
-			if (tile.foff >= members.size())
-				return false;
-			const auto reduced = state_->thumbnail_metric > 0.0f && level.metric == state_->thumbnail_metric;
-			const auto &member = members[tile.foff];
+		[this] ( const Level &level, const Tile &tile, uint8_t *dest, size_t &pos, unsigned worker ) {
+			return AssembleTile( level, tile, dest, pos, worker );
+		} );
+}
+
+
+bool GalleryLoader::AssembleTile ( const Level &level, const Tile &tile, uint8_t *dest,
+	size_t &pos, unsigned /*worker*/ )
+{
+	const auto &members = state_->manifest.members;
+	if (tile.foff >= members.size())
+		return false;
+	const auto reduced = state_->thumbnail_metric > 0.0f && level.metric == state_->thumbnail_metric;
+	const auto &member = members[tile.foff];
 #if USE_DCMTK
-			const auto &name = reduced ? member.thumbnail->file : member.file;
-			if (const auto frame = state_->frames.find( name ); frame != state_->frames.end()) {
-				auto in = std::ifstream( relative_path_local( *state_, name ), std::ios::binary );
-				in.seekg( (std::streamoff)frame->second.offset );
-				if (!in.read( reinterpret_cast<char *>( dest ), frame->second.length ))
-					return false;
-				pos = frame->second.length;
-				return true;
-			}
+	const auto &name = reduced ? member.thumbnail->file : member.file;
+	if (const auto frame = state_->frames.find( name ); frame != state_->frames.end()) {
+		auto in = std::ifstream( relative_path_local( *state_, name ), std::ios::binary );
+		in.seekg( (std::streamoff)frame->second.offset );
+		if (!in.read( reinterpret_cast<char *>( dest ), frame->second.length ))
+			return false;
+		pos = frame->second.length;
+		return true;
+	}
 #endif
-			if (reduced)
-				return load_thumbnail_local( *state_, member, level.pixel_type,
-					dest, level.tile_buffer_bytes, &pos );
+	if (reduced)
+		return load_thumbnail_local( *state_, member, level.pixel_type,
+			dest, level.tile_buffer_bytes, &pos );
 //
 // Opened per load rather than through the decode pool's cached handles: those
 // are kept per path per worker, and hundreds of members would hold hundreds of
 // handles open per thread for a read that is one sequential pass.
-			const auto path = member_path_local( *state_, members[tile.foff] );
-			auto in = std::ifstream( path, std::ios::binary );
-			if (!in)
-				return false;
-			in.read( reinterpret_cast<char *>( dest ), (std::streamsize)tile.fsz );
-			if ((size_t)in.gcount() != tile.fsz)
-				return false;
-			pos = tile.fsz;
-			return true;
-		} );
+	const auto path = member_path_local( *state_, members[tile.foff] );
+	auto in = std::ifstream( path, std::ios::binary );
+	if (!in)
+		return false;
+	in.read( reinterpret_cast<char *>( dest ), (std::streamsize)tile.fsz );
+	if ((size_t)in.gcount() != tile.fsz)
+		return false;
+	pos = tile.fsz;
+	return true;
 }
 
 } // namespace priml

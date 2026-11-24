@@ -510,6 +510,8 @@ public:
 
 protected:
 	bool Open ( Ppyr &pyramid ) override;
+	bool AssembleTile ( const Level &level, const Tile &tile, uint8_t *dest,
+		size_t &pos, unsigned worker ) override;
 
 private:
 	std::unique_ptr<GalleryState> state_;
@@ -544,6 +546,8 @@ public:
 
 protected:
 	bool Open ( Ppyr &pyramid ) override;
+	bool AssembleTile ( const Level &level, const Tile &tile, uint8_t *dest,
+		size_t &pos, unsigned worker ) override;
 
 private:
 	std::unique_ptr<CziState> state_;

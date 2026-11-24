@@ -14,6 +14,8 @@
 #include <httplib.h>
 #include <pyra/pyra.h>
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
@@ -25,6 +27,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -234,6 +237,101 @@ int main ( int argc, char **argv )
 			const auto response = client.Get( "/api/render?generation=" + std::to_string( version ) + "&plane=0&overview=1", headers );
 			require( response && response->status == 200 && response->body.size() <= pyra::web::kOverviewEdge * pyra::web::kOverviewEdge * 4,
 				"Overview exceeds bound" );
+		} );
+		run( "test_web_raw_tile_bytes_equal_encoded_tile", [&] {
+			const auto version = open( client, headers, "coarse.ptf" );
+			const auto query = "?generation=" + std::to_string( version );
+			const auto geometry = client.Get( "/api/geometry" + query, headers );
+			require( geometry && geometry->status == 200 && !geometry->body.empty(), "Geometry was not served" );
+			require( geometry->get_header_value( "Cache-Control" ).find( "immutable" ) != std::string::npos,
+				"Geometry is not marked immutable" );
+			auto *context = static_cast<pyra_context *>( nullptr );
+			auto *remote = static_cast<pyra_wsi *>( nullptr );
+			require( pyra_context_create( nullptr, &context, nullptr ) == PYRA_OK &&
+				pyra_open_remote( context, geometry->body.data(), geometry->body.size(), &remote, nullptr ) == PYRA_OK,
+				"Served geometry does not open as a remote slide" );
+			auto *native = static_cast<pyra_wsi *>( nullptr );
+			const auto path = pyra::web::utf8_path( argv[1] ) / "coarse.ptf";
+			const auto utf8 = path.u8string();
+			require( pyra_open( context, std::string( utf8.begin(), utf8.end() ).c_str(), &native, nullptr ) == PYRA_OK,
+				"Fixture does not open natively" );
+			auto expected = std::string{};
+			const auto sink = [] ( void *user, const void *data, size_t size ) {
+				static_cast<std::string *>( user )->assign( static_cast<const char *>( data ), size );
+			};
+			require( pyra_read_encoded_tile( native, 0, 0, sink, &expected, nullptr ) == PYRA_OK, "Native tile read failed" );
+			const auto tile = client.Get( "/api/raw-tile" + query + "&level=0&tile=0", headers );
+			require( tile && tile->status == 200 && tile->body == expected && !expected.empty(),
+				"Served tile differs from the stored bytes" );
+			require( pyra_put_encoded_tile( remote, 0, 0, tile->body.data(), tile->body.size(), nullptr ) == PYRA_OK,
+				"Served tile was refused by the remote slide" );
+			pyra_close( native, nullptr );
+			pyra_close( remote, nullptr );
+			pyra_context_destroy( context, nullptr );
+		} );
+		run( "test_web_render_htj2k_is_lossless", [&] {
+			const auto version = open( client, headers, "images/rgb8/rgb8.glr" );
+			const auto raw = client.Get( view_url( version ), headers );
+			const auto compressed = client.Get( view_url( version, "&encoding=htj2k" ), headers );
+			require( raw && raw->status == 200 && compressed && compressed->status == 200, "Render failed" );
+			if (!pyra_codec_can_encode( PYRA_CODEC_HTJ2K )) {
+				require( compressed->get_header_value( "X-Pyra-Encoding" ) == "raw", "Unencodable frame not sent raw" );
+				return;
+			}
+			require( compressed->get_header_value( "X-Pyra-Encoding" ) == "htj2k", "Frame was not HTJ2K" );
+			auto w = 0u, h = 0u;
+			auto rgb = std::string( raw->body.size() / 4 * 3, '\0' );
+			const auto buffer = pyra_image_buffer{ sizeof( pyra_image_buffer ), PYRA_PIXEL_RGB8, rgb.data(), rgb.size(),
+				3 * 3 };
+			require( pyra_decode_image( compressed->body.data(), compressed->body.size(), &buffer, &w, &h, nullptr ) ==
+				PYRA_OK && w == 3 && h == 2, "HTJ2K frame did not decode to the view" );
+			for (size_t i = 0, o = 0; i < raw->body.size(); i += 4, o += 3)
+				require( raw->body.compare( i, 3, rgb, o, 3 ) == 0, "HTJ2K frame differs from the raw frame" );
+			const auto refused = client.Get( view_url( version, "&encoding=png" ), headers );
+			require( refused && refused->status == 400, "An unknown encoding was accepted" );
+		} );
+		run( "test_web_cross_origin_isolated", [&] {
+			const auto page = client.Get( "/" );
+			require( page && page->get_header_value( "Cross-Origin-Opener-Policy" ) == "same-origin" &&
+				page->get_header_value( "Cross-Origin-Embedder-Policy" ) == "require-corp",
+				"The page is not cross-origin isolated" );
+		} );
+		run( "test_web_raw_tile_concurrent_requests", [&] {
+			const auto version = open( client, headers, "coarse.ptf" );
+			const auto url = "/api/raw-tile?generation=" + std::to_string( version ) + "&level=0&tile=0";
+			constexpr auto kClients = 8;
+			auto ok = std::array<bool, kClients>{};
+			auto threads = std::vector<std::thread>{};
+			for (auto i = 0; i < kClients; ++i)
+				threads.emplace_back( [&, i] {
+					auto own = httplib::Client( "127.0.0.1", host.port_ );
+					own.set_read_timeout( 15, 0 );
+					const auto response = own.Get( url, headers );
+					ok[i] = response && response->status == 200 && !response->body.empty();
+				} );
+			for (auto &thread : threads) thread.join();
+			require( std::all_of( ok.begin(), ok.end(), [] ( bool v ) { return v; } ),
+				"A concurrent tile request was refused" );
+		} );
+		run( "test_web_raw_tile_stale_generation", [&] {
+			const auto version = open( client, headers, "coarse.ptf" );
+			const auto response = client.Get( "/api/raw-tile?generation=" + std::to_string( version + 1 ) +
+				"&level=0&tile=0", headers );
+			require( response && response->status == 410, "A stale tile request was not 410 Gone" );
+		} );
+		run( "test_web_public_origin_accepted", [&] {
+			auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
+			options.public_origin = "https://viewer.example.org/";
+			auto proxied = RunningServer( std::move( options ) );
+			auto proxy = httplib::Client( "127.0.0.1", proxied.port_ );
+			auto forwarded = httplib::Headers{ { "X-Pyra-Session", proxied.server_.token() },
+				{ "Host", "viewer.example.org" }, { "Origin", "https://viewer.example.org" } };
+			const auto accepted = proxy.Get( "/api/state", forwarded );
+			require( accepted && accepted->status == 200, "A request from the public origin was refused" );
+			forwarded.erase( "Origin" );
+			forwarded.emplace( "Origin", "https://other.example.org" );
+			const auto refused = proxy.Get( "/api/state", forwarded );
+			require( refused && refused->status == 403, "A foreign origin was accepted through the proxy host" );
 		} );
 		run( "test_web_make_gallery_from_folder", [&] {
 			const auto refused = client.Post( "/api/make-gallery", headers,

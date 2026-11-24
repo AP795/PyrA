@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Alexandre Papine
 // SPDX-License-Identifier: MIT
 
+#include "display_rgba.h"
 #include "web_server.h"
 #include "web_analyse.h"
 #include "web_assets.h"
@@ -31,6 +32,17 @@
 #endif
 
 namespace pyra::web {
+
+#if PYRA_WEB_WITH_CLIENT
+// The browser client, embedded by embed_client.cmake (web_client_assets.cpp).
+namespace client_assets {
+extern const unsigned char js[];
+extern const size_t js_size;
+extern const unsigned char wasm[];
+extern const size_t wasm_size;
+}
+#endif
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -148,6 +160,7 @@ struct Session {
 	std::filesystem::path path_;		// absolute
 	std::string relative_;				// as the client named it
 	std::vector<pyra_plane_info> planes_;
+	std::string geometry_;				// pyra_get_geometry blob, made on first request
 	~Session () {
 		if (wsi_)
 			pyra_close( wsi_, nullptr );
@@ -157,41 +170,35 @@ struct Session {
 };
 
 
-uint8_t display_sample ( const unsigned char *row, size_t index, pyra_pixel_format format, double range )
-{
-	auto sample = 0.0;
-	if (format == PYRA_PIXEL_RGB16 || format == PYRA_PIXEL_GRAY16) {
-		auto value = uint16_t{};
-		std::memcpy( &value, row + index * sizeof( value ), sizeof( value ) );
-		sample = value;
-	} else if (format == PYRA_PIXEL_FLOAT32) {
-		auto value = float{};
-		std::memcpy( &value, row + index * sizeof( value ), sizeof( value ) );
-		sample = value;
-	} else {
-		sample = row[index];
-	}
-	const auto scaled = sample * 255.0 / range;
-	return std::isfinite( scaled ) ? uint8_t( std::clamp( scaled, 0.0, 255.0 ) ) : 0;
-}
-
-
 std::string rgba_pixels ( const std::vector<unsigned char> &source, const pyra_image_layout &layout, double range )
 {
 	auto result = std::string( size_t( layout.width ) * layout.height * 4, '\0' );
-	const auto rgb = layout.pixel_format == PYRA_PIXEL_RGB8 || layout.pixel_format == PYRA_PIXEL_RGB16;
-	if (!std::isfinite( range ) || range <= 0)
-		range = 1;
-	for (auto y = 0u; y < layout.height; ++y) {
-		const auto *row = source.data() + size_t( y ) * layout.row_stride_bytes;
-		auto *out = reinterpret_cast<unsigned char *>( result.data() + size_t( y ) * layout.width * 4 );
-		for (auto x = 0u; x < layout.width; ++x) {
-			for (auto c = 0u; c < 3; ++c)
-				out[x * 4 + c] = display_sample( row, rgb ? size_t( x ) * 3 + c : x, layout.pixel_format, range );
-			out[x * 4 + 3] = 255;
-		}
-	}
+	display_rgba( source.data(), layout, range, reinterpret_cast<unsigned char *>( result.data() ) );
 	return result;
+}
+
+
+void assign_bytes ( void *user, const void *data, size_t size )
+{
+	static_cast<std::string *>( user )->assign( static_cast<const char *>( data ), size );
+}
+
+
+// A display frame (RGBA8, alpha always opaque) as a lossless HTJ2K RGB8
+// codestream, which the browser client decodes (pyra_client_decode).
+std::string lossless_htj2k ( const std::string &rgba, uint32_t width, uint32_t height )
+{
+	auto rgb = std::vector<unsigned char>( size_t( width ) * height * 3 );
+	for (size_t i = 0, o = 0; i < rgba.size(); i += 4, o += 3)
+		std::memcpy( rgb.data() + o, rgba.data() + i, 3 );
+	const auto source = pyra_image_buffer{ sizeof( pyra_image_buffer ), PYRA_PIXEL_RGB8, rgb.data(), rgb.size(),
+		size_t( width ) * 3 };
+	auto encoded = std::string{};
+	auto error = pyra_error{};
+	if (pyra_encode_image( &source, width, height, PYRA_CODEC_HTJ2K, PYRA_QUALITY_LOSSLESS, assign_bytes, &encoded,
+		&error ) != PYRA_OK)
+		throw std::runtime_error( error.message );
+	return encoded;
 }
 
 } // namespace
@@ -205,22 +212,33 @@ public:
 		auto random = std::random_device{};
 		for (auto i = 0; i < 4; ++i)
 			token_ += std::format( "{:08x}", random() );
-		http_.new_task_queue = [] { return new httplib::ThreadPool( 2, 0, 4 ); };
+		set_public_origin( options_.public_origin );
+		http_.new_task_queue = [] { return new httplib::ThreadPool( kHttpWorkerThreads, 0, kHttpQueuedRequests ); };
 		http_.set_payload_max_length( 8192 );
 		http_.set_read_timeout( 5, 0 );
 		http_.set_write_timeout( 30, 0 );
 		http_.set_keep_alive_max_count( 20 );
+		http_.set_keep_alive_timeout( kKeepAliveSeconds );
 		http_.set_logger( [this] ( const auto &request, const auto &response ) {
 			if (options_.log) options_.log( std::format( "{} {} status={}", request.method, request.path, response.status ) );
 		} );
 		http_.set_pre_routing_handler( [this] ( const auto &request, auto &response ) {
 			response.set_header( "Cache-Control", "no-store" );
 			response.set_header( "X-Content-Type-Options", "nosniff" );
-			response.set_header( "Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" );
-			const auto host = std::format( "127.0.0.1:{}", port_ );
+// Cross-origin isolation: the browser client decodes on threads, which share
+// WebAssembly memory, and browsers grant SharedArrayBuffer only to isolated pages.
+// Every resource is same-origin, so nothing is lost.
+			response.set_header( "Cross-Origin-Opener-Policy", "same-origin" );
+			response.set_header( "Cross-Origin-Embedder-Policy", "require-corp" );
+			response.set_header( "Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" );
+			const auto loopback = std::format( "127.0.0.1:{}", port_ );
+			const auto host = request.get_header_value( "Host" );
 			const auto origin = request.get_header_value( "Origin" );
-			if (request.get_header_value( "Host" ) != host || ( !origin.empty() && origin != "http://" + host )) {
-				fail( response, 403, "Use the printed loopback URL" );
+			const auto local = host == loopback && ( origin.empty() || origin == "http://" + loopback );
+			const auto proxied = !public_host_.empty() && host == public_host_ &&
+				( origin.empty() || origin == public_origin_ );
+			if (!local && !proxied) {
+				fail( response, 403, "Use the printed loopback URL or the configured public origin" );
 				return httplib::Server::HandlerResponse::Handled;
 			}
 			if (request.path.starts_with( "/api/" ) && request.get_header_value( "X-Pyra-Session" ) != token_) {
@@ -247,11 +265,26 @@ public:
 		http_.Get( "/viewer.js", [] ( const auto &, auto &response ) {
 			response.set_content( assets::js.data(), assets::js.size(), "text/javascript; charset=utf-8" );
 		} );
+#if PYRA_WEB_WITH_CLIENT
+		http_.Get( "/client_worker.js", [] ( const auto &, auto &response ) {
+			response.set_content( assets::worker_js.data(), assets::worker_js.size(), "text/javascript; charset=utf-8" );
+		} );
+		http_.Get( "/pyra_client.js", [] ( const auto &, auto &response ) {
+			response.set_content( reinterpret_cast<const char *>( client_assets::js ), client_assets::js_size,
+				"text/javascript; charset=utf-8" );
+		} );
+		http_.Get( "/pyra_client.wasm", [] ( const auto &, auto &response ) {
+			response.set_content( reinterpret_cast<const char *>( client_assets::wasm ), client_assets::wasm_size,
+				"application/wasm" );
+		} );
+#endif
 		http_.Get( "/api/state", [this] ( const auto &, auto &response ) { state( response ); } );
 		http_.Get( "/api/files", [this] ( const auto &request, auto &response ) { files( request, response ); } );
 		http_.Post( "/api/open", [this] ( const auto &request, auto &response ) { open( request, response ); } );
 		http_.Post( "/api/make-gallery", [this] ( const auto &request, auto &response ) { make_gallery( request, response ); } );
 		http_.Get( "/api/render", [this] ( const auto &request, auto &response ) { render( request, response ); } );
+		http_.Get( "/api/geometry", [this] ( const auto &request, auto &response ) { geometry( request, response ); } );
+		http_.Get( "/api/raw-tile", [this] ( const auto &request, auto &response ) { raw_tile( request, response ); } );
 		http_.Post( "/api/generate", [this] ( const auto &request, auto &response ) { generate( request, response ); } );
 		http_.Get( "/api/generate", [this] ( const auto &, auto &response ) { generate_status( response ); } );
 		http_.Post( "/api/generate-cancel", [this] ( const auto &, auto &response ) {
@@ -308,9 +341,10 @@ public:
 		pyra_get_backend_info( PYRA_BACKEND_OPENSLIDE, &backend, nullptr );
 		json( response, "{\"root\":" + json_string( utf8( options_.root ) ) +
 			",\"initial_image\":" + json_string( options_.initial_image ) +
-			std::format( ",\"max_edge\":{},\"overview_edge\":{},\"openslide\":{},\"tbf_mib\":{},\"pbf_mib\":{},\"threads\":{},\"synthetic\":{},\"analyse\":{} }}",
+			std::format( ",\"max_edge\":{},\"overview_edge\":{},\"openslide\":{},\"tbf_mib\":{},\"pbf_mib\":{},\"threads\":{},\"synthetic\":{},\"analyse\":{},\"client\":{},\"client_cache_mib\":{} }}",
 				kMaxRenderEdge, kOverviewEdge, backend.available != 0, defaults.compressed_cache_bytes / kBytesPerMiB,
-				defaults.decoded_cache_bytes / kBytesPerMiB, defaults.decode_threads, synthetic_json(), analyser_.capabilities_json() ) );
+				defaults.decoded_cache_bytes / kBytesPerMiB, defaults.decode_threads, synthetic_json(), analyser_.capabilities_json(),
+				PYRA_WEB_WITH_CLIENT != 0, kClientCacheMiB ) );
 	}
 
 	// Starts writing a synthetic slide into a folder beneath the root; progress
@@ -528,12 +562,89 @@ public:
 		response.set_header( "X-Pyra-Height", std::to_string( layout.height ) );
 		response.set_header( "X-Pyra-Render-Ms", std::format( "{:.4f}", elapsed ) );
 		response.set_header( "X-Pyra-Incomplete", status == PYRA_INCOMPLETE ? "1" : "0" );
-		response.set_content( rgba_pixels( pixels, layout, plane.max_sample_value ), "application/octet-stream" );
+		auto frame = rgba_pixels( pixels, layout, plane.max_sample_value );
+		const auto encoding = request.get_param_value( "encoding" );
+		if (!encoding.empty() && encoding != "raw" && encoding != "htj2k")
+			throw std::invalid_argument( "Encoding must be raw or htj2k" );
+		if (encoding == "htj2k" && pyra_codec_can_encode( PYRA_CODEC_HTJ2K )) {
+			const auto encode_start = Clock::now();
+			frame = lossless_htj2k( frame, layout.width, layout.height );
+			response.set_header( "X-Pyra-Encode-Ms", std::format( "{:.4f}",
+				std::chrono::duration<double, std::milli>( Clock::now() - encode_start ).count() ) );
+			response.set_header( "X-Pyra-Encoding", "htj2k" );
+		} else
+			response.set_header( "X-Pyra-Encoding", "raw" );
+		response.set_content( std::move( frame ), "application/octet-stream" );
 		if (options_.log) options_.log( std::format( "Render plane={} {}x{} mpp={} native_ms={:.3f} incomplete={}",
 			plane_index, layout.width, layout.height, native.mpp, elapsed, status == PYRA_INCOMPLETE ) );
 	}
 
+	// "https://host[:port]" -> the Host header a proxy forwards for it.
+	void set_public_origin ( std::string origin ) {
+		while (origin.ends_with( '/' )) origin.pop_back();
+		if (origin.empty()) return;
+		const auto scheme = origin.find( "://" );
+		const auto host = scheme == std::string::npos ? std::string{} : origin.substr( scheme + 3 );
+		if (( !origin.starts_with( "https://" ) && !origin.starts_with( "http://" ) ) || host.empty() ||
+			host.find_first_of( "/?#@" ) != std::string::npos)
+			throw std::invalid_argument( "The public origin must be http(s)://host[:port]" );
+		public_origin_ = origin;
+		public_host_ = host;
+	}
+
+	// The open slide for a request naming its generation, or null with 410 Gone:
+	// a stale URL must not be cached as if it described the current slide.
+	Session *current_session ( const httplib::Request &request, httplib::Response &response ) {
+		if (!session_) { fail( response, 409, "Open an image first" ); return nullptr; }
+		if (integer( request, "generation", UINT64_MAX ) != generation_) {
+			fail( response, 410, "Image changed; discard the old request" );
+			return nullptr;
+		}
+		return session_.get();
+	}
+
+	static void immutable ( httplib::Response &response ) {
+		response.headers.erase( "Cache-Control" );
+		response.set_header( "Cache-Control", std::format( "private, max-age={}, immutable", kImmutableCacheSeconds ) );
+	}
+
+	// The geometry blob a client opens its sister slide from (pyra_open_remote).
+	void geometry ( const httplib::Request &request, httplib::Response &response ) {
+		auto lock = std::unique_lock( mutex_ );
+		auto *session = current_session( request, response );
+		if (!session) return;
+		if (session->geometry_.empty()) {
+			auto error = pyra_error{};
+			if (pyra_get_geometry( session->wsi_, assign_bytes, &session->geometry_, &error ) != PYRA_OK) {
+				fail( response, 400, error.message );
+				return;
+			}
+		}
+		immutable( response );
+		response.set_content( session->geometry_, "application/octet-stream" );
+	}
+
+	// One tile's stored bytes, unchanged; a sparse tile is an empty body. Waits for
+	// the slide rather than refusing: a client asks for many tiles at once.
+	void raw_tile ( const httplib::Request &request, httplib::Response &response ) {
+		auto lock = std::unique_lock( mutex_ );
+		auto *session = current_session( request, response );
+		if (!session) return;
+		const auto level = uint32_t( integer( request, "level", UINT32_MAX ) );
+		const auto tile = uint32_t( integer( request, "tile", UINT32_MAX ) );
+		auto bytes = std::string{};
+		auto error = pyra_error{};
+		if (pyra_read_encoded_tile( session->wsi_, level, tile, assign_bytes, &bytes, &error ) != PYRA_OK) {
+			fail( response, 400, error.message );
+			return;
+		}
+		immutable( response );
+		response.set_content( std::move( bytes ), "application/octet-stream" );
+	}
+
 	ServerOptions options_;
+	std::string public_origin_;			// empty: loopback only
+	std::string public_host_;
 	httplib::Server http_;
 	std::string token_;
 	int port_ = 0;

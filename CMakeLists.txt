@@ -29,6 +29,8 @@ option(PYR_WITH_OPENJPH  "HTJ2K tile and image codec (OpenJPH >= 0.33)"         
 option(PYR_WITH_JXL      "JPEG XL tile and image codec"                        OFF)
 option(PYR_WITH_DCMTK    "DICOM VL Whole Slide Microscopy loader"              OFF)
 option(PYR_WITH_CZI      "Zeiss CZI loader (libCZI, LGPL - link dynamically)"  OFF)
+option(PYR_WITH_JXR      "JPEG XR CZI sub-blocks (bundled jxrlib, BSD)"         ON)
+option(PYR_WITH_ZSTD     "zstd CZI sub-blocks (bundled zstd decoder, BSD)"      ON)
 option(PYRA_BUILD_GUI_TEST "Build the optional Qt Widgets viewer/evaluator" OFF)
 option(PYRA_BUILD_WEB_TEST "Build the optional localhost browser viewer (no Qt)" OFF)
 option(PYRA_BUILD_BRIDGE "Build pyra_process, the Python processing bridge (writes into DICOM slides with PYR_WITH_DCMTK)" ON)
@@ -43,6 +45,16 @@ include(cmake/PyraOptimizations.cmake)
 
 set(PYRA_LINUX_SDK "" CACHE PATH "Install prefix produced by Deps/build.sh")
 set(PYRA_WINDOWS_SDK "" CACHE PATH "Release SDK produced by Deps/build_windows.ps1")
+# Emscripten: C++ exceptions carry every library error to its C status, and
+# libjpeg's error exit longjmps; both use WebAssembly's native exception handling.
+if(EMSCRIPTEN)
+	add_compile_options(-fwasm-exceptions)
+	add_link_options(-fwasm-exceptions)
+# Shared memory for the decode pool: every object of the client, codecs included
+# (Deps/), is built for threads.
+	add_compile_options(-pthread)
+	add_link_options(-pthread)
+endif()
 if(PYRA_LINUX_SDK)
 	include(cmake/PyraLinuxSdk.cmake)
 elseif(PYRA_WINDOWS_SDK)
@@ -121,6 +133,7 @@ set(PYR_SOURCES
 	gallery.cpp
 	gallery_scan.cpp
 	img_codec.cpp
+	img_czi.cpp
 	img_htj2k.cpp
 	img_tiff.cpp
 	ipx_imd.cpp
@@ -129,6 +142,7 @@ set(PYR_SOURCES
 	ptf_write.cpp
 	ptf_subset.cpp
 	pyr_rt.cpp
+	remote_pyramid.cpp
 	synthetic.cpp
 	wsi.cpp
 	wsi_decode_pool.cpp
@@ -152,6 +166,7 @@ set(PYR_HEADERS
 	gallery_scan.h
 	geom.h
 	img_codec.h
+	img_czi.h
 	img_htj2k.h
 	img_htj2k_quantization.h
 	img_tiff.h
@@ -167,6 +182,7 @@ set(PYR_HEADERS
 	pyr_rt.h
 	pyr_text.h
 	pyr_win.h
+	remote_pyramid.h
 	synthetic.h
 	tiff_inc.h
 	wsi.h
@@ -195,6 +211,8 @@ set(USE_OPENJPH ${PYR_WITH_OPENJPH})
 set(USE_JXL ${PYR_WITH_JXL})
 set(USE_DCMTK ${PYR_WITH_DCMTK})
 set(USE_CZI ${PYR_WITH_CZI})
+set(USE_JXR ${PYR_WITH_JXR})
+set(USE_ZSTD ${PYR_WITH_ZSTD})
 set(USE_OPENSLIDE ${PYRA_WITH_OPENSLIDE})
 configure_file(
 	Core/build_config_generated.h.in
@@ -252,7 +270,7 @@ target_include_directories(pyra PUBLIC
 target_link_libraries(pyra PRIVATE pyra_core)
 set_target_properties(pyra PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 4
 	CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
 	target_link_options(pyra PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/pyra.exports")
 	set_property(TARGET pyra APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cmake/pyra.exports)
 endif()
@@ -274,6 +292,18 @@ install(TARGETS pyra EXPORT PyraTargets
 install(FILES Core/include/pyra/pyra.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pyra)
 install(FILES license.md DESTINATION ${CMAKE_INSTALL_DATADIR}/Pyra)
 set(pyra_notice_destination "${CMAKE_INSTALL_DATADIR}/Pyra/third-party")
+# The CZI sub-block decoders are compiled from Deps/ in every build that enables them.
+include(cmake/PyraDependencyNotices.cmake)
+set(pyra_codec_notices)
+if(PYR_WITH_JXR)
+	list(APPEND pyra_codec_notices jxrlib)
+endif()
+if(PYR_WITH_ZSTD)
+	list(APPEND pyra_codec_notices zstd)
+endif()
+if(pyra_codec_notices)
+	pyra_install_dependency_notices("${pyra_notice_destination}" ${pyra_codec_notices})
+endif()
 if(PYRA_WINDOWS_SDK OR PYRA_LINUX_SDK)
 	include(cmake/PyraDependencyNotices.cmake)
 	set(pyra_bundled_notices libjpeg-turbo libtiff)
@@ -291,6 +321,8 @@ if(PYRA_WINDOWS_SDK OR PYRA_LINUX_SDK)
 	endif()
 	pyra_install_dependency_notices("${pyra_notice_destination}" ${pyra_bundled_notices})
 endif()
+# An Emscripten build makes only the browser client: there is no shared library to export.
+if(NOT EMSCRIPTEN)
 install(EXPORT PyraTargets NAMESPACE Pyra:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Pyra)
 configure_package_config_file(cmake/PyraConfig.cmake.in
 	${CMAKE_CURRENT_BINARY_DIR}/PyraConfig.cmake
@@ -300,6 +332,7 @@ write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/PyraConfigVersion.c
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/PyraConfig.cmake
 	${CMAKE_CURRENT_BINARY_DIR}/PyraConfigVersion.cmake
 	DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Pyra)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
@@ -332,6 +365,10 @@ if(BUILD_TESTING)
 	target_compile_definitions(pyra_c_api_test PRIVATE PYRA_TEST_WITH_OPENJPEG=$<BOOL:${PYR_WITH_OPENJPEG}>)
 	add_test(NAME pyra_c_api COMMAND pyra_c_api_test "${PYRA_TEST_OUTPUT_DIRECTORY}")
 	set_tests_properties(pyra_c_api PROPERTIES FIXTURES_REQUIRED pyra_wsi_fixture)
+	add_executable(pyra_remote_test Tests/remote_test.cpp)
+	target_link_libraries(pyra_remote_test PRIVATE Pyra::pyra pyra_core)
+	add_test(NAME pyra_remote COMMAND pyra_remote_test "${PYRA_TEST_OUTPUT_DIRECTORY}/remote")
+	set_tests_properties(pyra_remote PROPERTIES TIMEOUT 120)
 	add_executable(pyra_make_gallery Tests/make_gallery.cpp)
 	target_link_libraries(pyra_make_gallery PRIVATE Pyra::pyra)
 	add_executable(pyra_make_synthetic Tests/make_synthetic.cpp)
@@ -383,6 +420,41 @@ if(PYR_WITH_DCMTK)
 	target_link_libraries(pyra_core PRIVATE DCMTK::DCMTK)
 endif()
 
+# CZI sub-block payload decoders, built from the bundled sources (img_czi.cpp).
+if(PYR_WITH_ZSTD)
+	file(GLOB PYRA_ZSTD_SOURCES CONFIGURE_DEPENDS
+		"${CMAKE_CURRENT_SOURCE_DIR}/Deps/zstd/lib/common/*.c"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Deps/zstd/lib/decompress/*.c")
+	add_library(pyra_zstd STATIC ${PYRA_ZSTD_SOURCES})
+	target_include_directories(pyra_zstd PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/Deps/zstd/lib")
+	target_compile_definitions(pyra_zstd PRIVATE ZSTD_DISABLE_ASM ZSTD_MULTITHREAD=0)
+	set_target_properties(pyra_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON)
+	target_link_libraries(pyra_core PRIVATE pyra_zstd)
+endif()
+if(PYR_WITH_JXR)
+	set(PYRA_JXR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Deps/jxrlib")
+	file(GLOB PYRA_JXR_SOURCES CONFIGURE_DEPENDS
+		"${PYRA_JXR_DIR}/common/src/*.c"
+		"${PYRA_JXR_DIR}/image/decode/*.c"
+		"${PYRA_JXR_DIR}/image/encode/*.c"
+		"${PYRA_JXR_DIR}/image/sys/*.c"
+		"${PYRA_JXR_DIR}/jxrgluelib/*.c")
+	add_library(pyra_jxr STATIC ${PYRA_JXR_SOURCES})
+# jxrlib ships its own guiddef.h, which must not shadow the Windows SDK's in
+# other translation units: only the jxrlib sources and img_czi.cpp see its headers.
+	set(PYRA_JXR_INCLUDES "${PYRA_JXR_DIR}/jxrgluelib" "${PYRA_JXR_DIR}/image/sys" "${PYRA_JXR_DIR}/common/include")
+	target_include_directories(pyra_jxr PRIVATE ${PYRA_JXR_INCLUDES} "${PYRA_JXR_DIR}/pyra")
+	set_source_files_properties("${PYRA_CORE_SOURCE_DIR}/img_czi.cpp" TARGET_DIRECTORY pyra_core
+		PROPERTIES INCLUDE_DIRECTORIES "${PYRA_JXR_INCLUDES}")
+	set_target_properties(pyra_jxr PROPERTIES POSITION_INDEPENDENT_CODE ON)
+	if(MSVC)
+		target_compile_options(pyra_jxr PRIVATE /W0)
+	else()
+		target_compile_options(pyra_jxr PRIVATE -w)
+	endif()
+	target_link_libraries(pyra_core PRIVATE pyra_jxr)
+endif()
+
 if(PYR_WITH_CZI)
 #
 # libCZI is LGPL-3.0-or-later: link it dynamically. See build_config.h.
@@ -390,6 +462,15 @@ if(PYR_WITH_CZI)
 	find_path(LIBCZI_INCLUDE_DIR NAMES libCZI.h REQUIRED)
 	target_include_directories(pyra_core PRIVATE ${LIBCZI_INCLUDE_DIR})
 	target_link_libraries(pyra_core PRIVATE ${LIBCZI_LIBRARY})
+# PyrA's own sub-block decoders against libCZI's, which only this build has.
+	if(BUILD_TESTING AND PYR_WITH_JXR AND PYR_WITH_ZSTD)
+		add_executable(pyra_czi_decode_test Tests/czi_decode_test.cpp)
+		target_include_directories(pyra_czi_decode_test PRIVATE ${LIBCZI_INCLUDE_DIR})
+		target_link_libraries(pyra_czi_decode_test PRIVATE pyra_core ${LIBCZI_LIBRARY})
+		add_test(NAME pyra_czi_decode COMMAND pyra_czi_decode_test)
+		get_filename_component(PYRA_LIBCZI_BIN "${LIBCZI_LIBRARY}" DIRECTORY)
+		set_tests_properties(pyra_czi_decode PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PYRA_LIBCZI_BIN}")
+	endif()
 endif()
 
 # The bridge first: the web viewer's Analyse links it when it exists.
@@ -401,4 +482,8 @@ if(PYRA_BUILD_GUI_TEST)
 endif()
 if(PYRA_BUILD_WEB_TEST)
 	add_subdirectory(ViewW)
+endif()
+# The web viewer's browser client, built by an Emscripten configure of this tree.
+if(EMSCRIPTEN)
+	add_subdirectory(ViewW/wasm)
 endif()

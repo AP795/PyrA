@@ -113,7 +113,9 @@ int main ( int argc, char **argv )
 				std::cout << "Usage: pyra_web_test [--root IMAGE_DIRECTORY] [--image RELATIVE_PATH]\n"
 					"                     [--port PORT] [--log-dir DIRECTORY]\n"
 					"                     [--scripts DIR] [--bridge-cli PATH] [--bridge-worker PATH] [--python PATH]\n"
+					"                     [--public-origin https://HOST[:PORT]]\n"
 					"Analyse offers the *.py files of --scripts (default: the bridge's examples).\n"
+					"--public-origin also accepts requests a reverse proxy forwards from that origin.\n"
 					"Open the printed loopback URL in your browser. Ctrl+C stops the server.\n";
 				return 0;
 			}
@@ -126,6 +128,7 @@ int main ( int argc, char **argv )
 			else if (argument == "--bridge-cli") bridge.bridge_cli = pyra::web::utf8_path( value );
 			else if (argument == "--bridge-worker") bridge.bridge_worker = pyra::web::utf8_path( value );
 			else if (argument == "--python") bridge.python = pyra::web::utf8_path( value );
+			else if (argument == "--public-origin") bridge.public_origin = value;
 			else if (argument == "--port") {
 				auto end = size_t{};
 				port = std::stoi( value, &end );
@@ -145,7 +148,7 @@ int main ( int argc, char **argv )
 			log << message << '\n' << std::flush;
 		};
 		auto server = pyra::web::Server( { root, initial, write_log, bridge.scripts, bridge.bridge_cli,
-			bridge.bridge_worker, bridge.python } );
+			bridge.bridge_worker, bridge.python, bridge.public_origin } );
 		port = server.bind( port );
 		if (port < 0) throw std::runtime_error( "Cannot bind loopback port; use --port 0 to select a free one" );
 		const auto url = std::format( "http://127.0.0.1:{}/", port );

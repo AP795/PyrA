@@ -469,6 +469,44 @@ void test_disabled_cache_and_incomplete ( const std::filesystem::path &path )
 		"Missing tiles were not rendered as background" );
 }
 
+void collect_bytes ( void *user, const void *data, size_t size )
+{
+	const auto *first = static_cast<const uint8_t *>( data );
+	static_cast<std::vector<uint8_t> *>( user )->assign( first, first + size );
+}
+
+
+// A standalone image survives HTJ2K lossless encoding exactly, and the decoder
+// reports its size before writing it.
+void test_c_api_image_htj2k_lossless_round_trip ()
+{
+	if (!pyra_codec_can_encode( PYRA_CODEC_HTJ2K ))
+		return;
+	constexpr auto width = 173u, height = 61u;
+	auto source = std::vector<uint8_t>( size_t( width ) * height * 3 );
+	for (size_t i = 0; i < source.size(); ++i)
+		source[i] = uint8_t( i * 7 + i / 97 );
+	const auto input = pyra_image_buffer{ sizeof( pyra_image_buffer ), PYRA_PIXEL_RGB8, source.data(), source.size(),
+		size_t( width ) * 3 };
+	auto encoded = std::vector<uint8_t>{};
+	auto error = pyra_error{};
+	require( pyra_encode_image( &input, width, height, PYRA_CODEC_HTJ2K, PYRA_QUALITY_LOSSLESS, collect_bytes, &encoded,
+		&error ) == PYRA_OK && !encoded.empty(), "HTJ2K encode failed" );
+	auto w = 0u, h = 0u;
+	require( pyra_decode_image( encoded.data(), encoded.size(), nullptr, &w, &h, &error ) == PYRA_OK &&
+		w == width && h == height, "Decoded image size differs" );
+	auto decoded = std::vector<uint8_t>( source.size() );
+	const auto output = pyra_image_buffer{ sizeof( pyra_image_buffer ), PYRA_PIXEL_RGB8, decoded.data(), decoded.size(),
+		size_t( width ) * 3 };
+	require( pyra_decode_image( encoded.data(), encoded.size(), &output, &w, &h, &error ) == PYRA_OK && decoded == source,
+		"HTJ2K lossless round trip changed samples" );
+	const auto small = pyra_image_buffer{ sizeof( pyra_image_buffer ), PYRA_PIXEL_RGB8, decoded.data(), 3, 3 };
+	require( pyra_decode_image( encoded.data(), encoded.size(), &small, &w, &h, nullptr ) == PYRA_BUFFER_TOO_SMALL,
+		"A small destination was accepted" );
+	require( pyra_encode_image( &input, width, height, PYRA_CODEC_HTJ2K, 0, collect_bytes, &encoded, nullptr ) ==
+		PYRA_INVALID_ARGUMENT, "Quality 0 was accepted" );
+}
+
 } // namespace
 
 
@@ -489,6 +527,7 @@ int main ( int argc, char **argv )
 		test_disabled_cache_and_incomplete( source );
 		test_color_storage( directory );
 		test_unsupported_compression( directory );
+		test_c_api_image_htj2k_lossless_round_trip();
 		const auto unicode = directory / std::filesystem::path( u8"unicode-\u03b1-\u65e5.ptf" );
 		std::filesystem::copy_file( source, unicode, std::filesystem::copy_options::overwrite_existing );
 		test_queries_and_ownership( unicode );

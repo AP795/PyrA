@@ -49,8 +49,20 @@ these two TIFF codecs:
 PYRA_DEPENDENCY_ZLIB=OFF bash Deps/build.sh
 ```
 
-JBIG, LERC, LZMA, WebP and Zstd are omitted. These are codec limitations
-of this minimal upload, not missing requirements of the browser viewer.
+JBIG, LERC, LZMA, WebP and Zstd are omitted from TIFF. These are codec
+limitations of this minimal upload, not missing requirements of the browser viewer.
+
+`jxrlib/` (jxrlib 1.1, Microsoft, BSD; the portable copy libCZI carries, see
+`jxrlib/LICENSE`) and `zstd/` (zstd 1.5.7 decompressor, BSD) decode JPEG XR and
+zstd CZI sub-blocks (`Core/img_czi.cpp`, `PYR_WITH_JXR` / `PYR_WITH_ZSTD`, on by
+default). PyrA compiles them directly; no SDK step is needed. libCZI itself is
+used only by the CZI loader, so a build without it, such as the browser client,
+still decodes CZI tiles. `jxrlib/pyra/JxrDecode_Config.h` replaces the
+configure step of libCZI's build with preprocessor tests.
+
+The same adapter also accepts an Emscripten configure (`emcmake cmake -S Deps`),
+which builds the codecs of the web viewer's browser client for wasm32 with
+WebAssembly exception handling. See [the viewer README](../ViewW/README.md#building-the-client).
 
 The codec test checks lossless JPEG 8/12/16-bit round trips, TIFF LZW and
 Deflate round trips, an OpenJPEG lossless round trip, and OpenJPH and httplib

@@ -9,5 +9,7 @@
 #cmakedefine01 USE_OPENJPH
 #cmakedefine01 USE_JXL
 #cmakedefine01 USE_CZI
+#cmakedefine01 USE_JXR
+#cmakedefine01 USE_ZSTD
 #cmakedefine01 USE_OPENSLIDE
 #define PYRA_VERSION "@PROJECT_VERSION@"

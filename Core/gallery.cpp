@@ -232,7 +232,13 @@ std::optional<std::int64_t> gallery_file_mtime ( const std::filesystem::path &pa
 	const auto written = std::filesystem::last_write_time( path, ec );
 	if (ec)
 		return std::nullopt;
+// The same conversion either way: libc++ (Emscripten, macOS) has no clock_cast
+// but provides the optional file_clock::to_sys, which MSVC omits.
+#if defined( _LIBCPP_VERSION )
+	const auto system = std::chrono::file_clock::to_sys( written );
+#else
 	const auto system = std::chrono::clock_cast<std::chrono::system_clock>( written );
+#endif
 	return std::chrono::duration_cast<std::chrono::seconds>(
 		system.time_since_epoch() ).count();
 }

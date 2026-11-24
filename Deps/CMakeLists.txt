@@ -9,8 +9,16 @@ endif()
 project(PyraUploadedDependencies LANGUAGES C CXX)
 
 # Copy the bundled sources before replacing their Windows platform configs.
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-	message(FATAL_ERROR "This dependency adapter requires 64-bit Linux.")
+# Emscripten (wasm32) builds the codecs of the browser client (Core/wasm).
+set(PYRA_DEPENDENCY_WASM OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+	set(PYRA_DEPENDENCY_WASM ON)
+# libjpeg/libtiff error exits longjmp: match the client's native exception model.
+	add_compile_options(-fwasm-exceptions)
+# The client decodes on threads: its objects must all use shared memory.
+	add_compile_options(-pthread)
+elseif(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+	message(FATAL_ERROR "This dependency adapter requires 64-bit Linux or Emscripten.")
 endif()
 set(PYRA_DEPENDENCY_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 option(PYRA_DEPENDENCY_ZLIB "Build bundled zlib for TIFF Deflate/PixarLog" ON)
@@ -123,6 +131,7 @@ set(OJPH_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(OJPH_ENABLE_TIFF_SUPPORT OFF CACHE BOOL "" FORCE)
 add_subdirectory("${PYRA_DEPENDENCY_SOURCE_DIR}/OpenJPH" "${CMAKE_CURRENT_BINARY_DIR}/openjph")
 
+if(NOT PYRA_DEPENDENCY_WASM)
 enable_testing()
 add_executable(pyra_dependency_test dependency_test.cpp)
 target_compile_definitions(pyra_dependency_test PRIVATE PYRA_TEST_ZLIB=$<BOOL:${PYRA_DEPENDENCY_ZLIB}>)
@@ -130,6 +139,7 @@ target_link_libraries(pyra_dependency_test PRIVATE tiff openjp2 openjph)
 target_include_directories(pyra_dependency_test PRIVATE "${PYRA_DEPENDENCY_SOURCE_DIR}/OpenJPH/src/core")
 target_include_directories(pyra_dependency_test SYSTEM PRIVATE "${PYRA_DEPENDENCY_SOURCE_DIR}/httplib")
 add_test(NAME pyra_uploaded_codecs COMMAND pyra_dependency_test "${CMAKE_CURRENT_BINARY_DIR}/test_out")
+endif()
 
 install(TARGETS jpeg tiff openjp2 ARCHIVE DESTINATION lib)
 include(../cmake/PyraDependencyNotices.cmake)

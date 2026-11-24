@@ -75,3 +75,13 @@
 #ifndef USE_CZI
 #define USE_CZI 1
 #endif
+
+// USE_JXR / USE_ZSTD: decode JPEG XR and zstd CZI sub-block payloads (img_czi.cpp)
+// with the bundled jxrlib and zstd sources in Deps/ (both BSD). Independent of
+// USE_CZI: a remote client decodes the CZI tiles a server's loader serves.
+#ifndef USE_JXR
+#define USE_JXR 1
+#endif
+#ifndef USE_ZSTD
+#define USE_ZSTD 1
+#endif

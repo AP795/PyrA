@@ -1102,10 +1102,11 @@ static bool PrepareRenderTilesLocal ( WsiLoader &loader,
 		decode_complete = stats->decode_fail == 0;
 		decoded = ready_tiles > 0;
 	}
-	LogGenerateFailures( level_index, microns_per_pixel, plan,
-		stats->load_ok, stats->load_fail,
-		stats->decode_ok, stats->decode_fail,
-		ready_tiles, decoded );
+	if (!pyramid.deferred_tiles || stats->decode_fail > stats->load_fail)
+		LogGenerateFailures( level_index, microns_per_pixel, plan,
+			stats->load_ok, stats->load_fail,
+			stats->decode_ok, stats->decode_fail,
+			ready_tiles, decoded );
 	if (decoded && ( decode_complete || ready_tiles > 0 ))
 		return true;
 
@@ -1246,7 +1247,7 @@ Pwhl<pixeltype> WsiLoader::GenerateSpan (
 			pyramid.stats.incomplete_renders++;
 			if (const auto *reason = img_codec_unavailable_reason( pyramid.unsupported_codec_->load() )) {
 				pyr::plog_err( "wsi generate INCOMPLETE: %s\n", reason );
-			} else {
+			} else if (!pyramid.deferred_tiles || tile_stats.decode_fail > tile_stats.load_fail) {
 				pyr::plog_err(
 					"wsi generate INCOMPLETE: %llu of %zu tiles missing at level %d "
 					"(mpp=%.4f) - the frame has unpainted areas; "

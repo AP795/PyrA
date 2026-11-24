@@ -356,8 +356,9 @@ static std::vector<DecodeTask> CollectDecodeTasksLocal (
 				status = WaitForTileIdle( tile );
 				if (status == TileSts::Ready || status == TileSts::Empty) {
 					if (status == TileSts::Empty) {
-						LogTileFailure( "decode-missing-load", plan.level_no,
-							tile_no, tile, "tile returned to Empty before decode" );
+						if (!pyramid.deferred_tiles)
+							LogTileFailure( "decode-missing-load", plan.level_no,
+								tile_no, tile, "tile returned to Empty before decode" );
 						++decode_fail;
 					}
 					break;
@@ -365,8 +366,10 @@ static std::vector<DecodeTask> CollectDecodeTasksLocal (
 			}
 			if (status != TileSts::Loaded) {
 				if (status == TileSts::Empty) {
-					LogTileFailure( "decode-missing-load", plan.level_no,
-						tile_no, tile, "tile is Empty when decode was requested" );
+// A deferred tile not yet put is a pending fetch, already counted as a load failure.
+					if (!pyramid.deferred_tiles)
+						LogTileFailure( "decode-missing-load", plan.level_no,
+							tile_no, tile, "tile is Empty when decode was requested" );
 					++decode_fail;
 				}
 				break;

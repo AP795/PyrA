@@ -2,8 +2,9 @@
 # Copyright (c) 2026 Alexandre Papine
 # SPDX-License-Identifier: MIT
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-	message(FATAL_ERROR "PYRA_LINUX_SDK is only supported on Linux")
+# Emscripten uses the same SDK layout, built by an emcmake configure of Deps/.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT EMSCRIPTEN)
+	message(FATAL_ERROR "PYRA_LINUX_SDK is only supported on Linux and Emscripten")
 endif()
 
 set(pyra_sdk_include "${PYRA_LINUX_SDK}/include")

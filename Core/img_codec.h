@@ -80,8 +80,8 @@ constexpr bool img_codec_can_encode ( ImgCodec codec ) noexcept
 //
 //   0  "CZSB"                     magic
 //   4  uint8   version
-//   5  uint8   libCZI CompressionMode
-//   6  uint8   libCZI PixelType
+//   5  uint8   CziCompression (img_czi.h), the CZI file's own value
+//   6  uint8   CziPixelType (img_czi.h), the CZI file's own value
 //   7  uint8   reserved
 //   8  uint32  width
 //  12  uint32  height
@@ -107,7 +107,8 @@ inline constexpr uint8_t kCziTileHeaderVersion = 1;
 inline constexpr int kRawTileHeaderBytes = 16;
 inline constexpr uint8_t kRawTileHeaderVersion = 1;
 
-enum class RawSampleLayout : uint8_t { Gray8 = 1, Gray16 = 2, Rgb8 = 3, Rgb16 = 4 };
+// Float32 decodes only to float: there is no agreed narrowing of float samples.
+enum class RawSampleLayout : uint8_t { Gray8 = 1, Gray16 = 2, Rgb8 = 3, Rgb16 = 4, Float32 = 5 };
 
 // Bytes one pixel of `layout` occupies in the payload; 0 for an unknown layout.
 size_t raw_sample_pixel_bytes ( RawSampleLayout layout ) noexcept;
@@ -122,6 +123,8 @@ constexpr RawSampleLayout raw_sample_layout_of () noexcept
 		return RawSampleLayout::Gray16;
 	else if constexpr (std::is_same_v<pixeltype, Rgb16>)
 		return RawSampleLayout::Rgb16;
+	else if constexpr (std::is_same_v<pixeltype, float>)
+		return RawSampleLayout::Float32;
 	else
 		return RawSampleLayout::Rgb8;
 }

@@ -757,6 +757,11 @@ struct Ppyr {
 // mean different things to a user: a DICOM may carry a perfectly good barcode
 // and no label image at all.
 	bool barcode_from_metadata = false;
+//
+// Tiles reach this pyramid after the render that asks for them (a remote
+// client, see remote_pyramid.h): an absent tile is a fetch to make, not a
+// failure, so the render path does not log it as one.
+	bool deferred_tiles = false;
 	PpyrStats stats;
 // Reader operations share fallback state, statistics, and format file handles.
 // Serialize callers per slide; tile decoding inside an operation stays parallel.

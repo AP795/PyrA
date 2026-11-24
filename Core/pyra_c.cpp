@@ -7,6 +7,7 @@
 #include "pyra_api_internal.h"
 #include "gallery_scan.h"
 #include "pyra_openslide.h"
+#include "remote_pyramid.h"
 #include "synthetic.h"
 #include "wsi.h"
 
@@ -74,6 +75,8 @@ pyra_status api_call ( pyra_error *error, F &&function ) noexcept
 struct WsiState {
 	priml::Ppyr pyramid_;
 	std::unique_ptr<priml::WsiLoader> loader_;
+// Set, and owning loader_, for a slide opened from a remote geometry blob.
+	priml::RemoteLoader *remote_ = nullptr;
 	std::unique_ptr<pyra::detail::OpenSlideReader> openslide_;
 	std::filesystem::path path_;
 	uint64_t last_use_ = 0;
@@ -236,6 +239,27 @@ pyra_image_layout image_layout ( const pyra_wsi &wsi, const pyra_image_request *
 }
 
 
+// The context's cache options and shared budget, applied to a slide about to open.
+void configure_cache ( pyra_context &context, WsiState &state )
+{
+	auto &pyramid = state.pyramid_;
+	pyramid.decode_threads = (int)context.options_.decode_threads;
+	pyramid.ram_cap_bytes = 0;
+	pyramid.cache_topology = context.options_.cache_topology == PYRA_CACHE_PER_LEVEL
+		? priml::CacheTopology::PerLevel : priml::CacheTopology::PerPyramid;
+	pyramid.tbf_cap_bytes = (size_t)context.options_.compressed_cache_bytes;
+	pyramid.pxb_cap_bytes = (size_t)context.options_.decoded_cache_bytes;
+	pyramid.use_pixbf = context.options_.decoded_cache_bytes > 0;
+	pyramid.cache_growth_budget = [&context, requester = &state] ( bool decoded, size_t wanted ) {
+// Coarse-level construction needs temporary decoded tile scratch even when
+// retained decoded caching is disabled. It is released before open returns.
+		if (decoded && context.options_.decoded_cache_bytes == 0 && requester->opening_)
+			return wanted;
+		return context.growth_budget( requester, decoded, wanted );
+	};
+}
+
+
 std::shared_ptr<WsiState> open_state ( pyra_context &context, const char *path )
 {
 	const auto source = pyr::path_from_utf8( path );
@@ -259,21 +283,8 @@ std::shared_ptr<WsiState> open_state ( pyra_context &context, const char *path )
 		state->openslide_ = context.openslide_->open( filename );
 		return state;
 	}
+	configure_cache( context, *state );
 	auto &pyramid = state->pyramid_;
-	pyramid.decode_threads = (int)context.options_.decode_threads;
-	pyramid.ram_cap_bytes = 0;
-	pyramid.cache_topology = context.options_.cache_topology == PYRA_CACHE_PER_LEVEL
-		? priml::CacheTopology::PerLevel : priml::CacheTopology::PerPyramid;
-	pyramid.tbf_cap_bytes = (size_t)context.options_.compressed_cache_bytes;
-	pyramid.pxb_cap_bytes = (size_t)context.options_.decoded_cache_bytes;
-	pyramid.use_pixbf = context.options_.decoded_cache_bytes > 0;
-	pyramid.cache_growth_budget = [&context, requester = state.get()] ( bool decoded, size_t wanted ) {
-// Coarse-level construction needs temporary decoded tile scratch even when
-// retained decoded caching is disabled. It is released before open returns.
-		if (decoded && context.options_.decoded_cache_bytes == 0 && requester->opening_)
-			return wanted;
-		return context.growth_budget( requester, decoded, wanted );
-	};
 	state->loader_ = priml::WsiLoader::Create( filename );
 	require( state->loader_ != nullptr, "No enabled loader supports this source", PYRA_UNSUPPORTED );
 	auto type = priml::LevelPixelType::Rgb8;
@@ -289,6 +300,38 @@ std::shared_ptr<WsiState> open_state ( pyra_context &context, const char *path )
 	if (context.options_.decoded_cache_bytes == 0)
 		(void)reclaim_cache( *state, true );
 	require( !pyramid.planes.empty(), "Slide has no supported image planes", PYRA_UNSUPPORTED );
+	return state;
+}
+
+
+// A sister slide built from a server's geometry blob. It has no path, so it is
+// never shared with another open, but it draws on the context's cache budget.
+std::shared_ptr<WsiState> open_remote_state ( pyra_context &context, const void *geometry, size_t size )
+{
+	require( !context.openslide_, "Remote slides need the native backend", PYRA_UNSUPPORTED );
+	std::erase_if( context.wsis_, [] ( const auto &weak ) { return weak.expired(); } );
+	auto state = std::make_shared<WsiState>();
+	state->last_use_ = ++context.clock_;
+	context.wsis_.push_back( state );
+	configure_cache( context, *state );
+	auto loader = std::make_unique<priml::RemoteLoader>();
+	state->remote_ = loader.get();
+	state->loader_ = std::move( loader );
+	auto reason = std::string{};
+	const auto opened = state->remote_->OpenRemote( static_cast<const uint8_t *>( geometry ), size, state->pyramid_, &reason );
+	require( opened, reason.c_str() );
+	state->opening_ = false;
+	require( !state->pyramid_.planes.empty(), "Slide has no supported image planes", PYRA_UNSUPPORTED );
+	return state;
+}
+
+
+// The open file a server describes and reads tiles from.
+WsiState &served_state ( pyra_wsi &wsi )
+{
+	auto &state = *wsi.state_;
+	require( state.loader_ && !state.remote_ && !state.openslide_,
+		"Geometry and stored tiles come from a native slide opened from its file", PYRA_UNSUPPORTED );
 	return state;
 }
 
@@ -844,5 +887,182 @@ pyra_status pyra_get_image ( pyra_wsi *wsi, const pyra_image_request *request,
 			++wsi->context_->incomplete_;
 			throw ApiFailure{ PYRA_INCOMPLETE, "Image contains missing tiles; available pixels were returned" };
 		}
+	} );
+}
+
+
+pyra_status pyra_get_geometry ( pyra_wsi *wsi, pyra_bytes_fn sink, void *user, pyra_error *error )
+{
+	return api_call( error, [&] {
+		require( wsi && sink, "Slide and byte sink are required" );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		auto &state = served_state( *wsi );
+		auto bytes = std::vector<uint8_t>{};
+		auto reason = std::string{};
+		const auto written = priml::serialize_remote_geometry( state.pyramid_, &bytes, &reason );
+		require( written, reason.c_str(), PYRA_UNSUPPORTED );
+		sink( user, bytes.data(), bytes.size() );
+	} );
+}
+
+
+pyra_status pyra_read_encoded_tile ( pyra_wsi *wsi, uint32_t level_index,
+	uint32_t tile_index, pyra_bytes_fn sink, void *user, pyra_error *error )
+{
+	return api_call( error, [&] {
+		require( wsi && sink, "Slide and byte sink are required" );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		auto &state = served_state( *wsi );
+		require( level_index < state.pyramid_.levels.size() &&
+			tile_index <= uint32_t( std::numeric_limits<int>::max() ), "Tile index is out of range" );
+		state.last_use_ = ++wsi->context_->clock_;
+		auto bytes = std::vector<uint8_t>{};
+		auto reason = std::string{};
+		const auto read = priml::read_remote_tile( *state.loader_, state.pyramid_, int( level_index ), int( tile_index ),
+			&bytes, &reason );
+		require( read, reason.c_str(), PYRA_IO_ERROR );
+		sink( user, bytes.data(), bytes.size() );
+	} );
+}
+
+
+pyra_status pyra_open_remote ( pyra_context *context, const void *geometry, size_t size,
+	pyra_wsi **wsi, pyra_error *error )
+{
+	if (wsi)
+		*wsi = nullptr;
+	return api_call( error, [&] {
+		require( context && wsi && geometry && size > 0, "Context, geometry, and slide output are required" );
+		auto guard = std::scoped_lock( context->mutex_ );
+		auto owner = std::make_unique<pyra_wsi>();
+		owner->context_ = context;
+		owner->state_ = open_remote_state( *context, geometry, size );
+		++context->handles_;
+		*wsi = owner.release();
+	} );
+}
+
+
+pyra_status pyra_put_encoded_tile ( pyra_wsi *wsi, uint32_t level_index,
+	uint32_t tile_index, const void *data, size_t size, pyra_error *error )
+{
+	return api_call( error, [&] {
+		require( wsi, "Slide is null" );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		auto &state = *wsi->state_;
+		require( state.remote_ != nullptr, "Tiles are put only into a remote slide", PYRA_UNSUPPORTED );
+		require( level_index <= uint32_t( std::numeric_limits<int>::max() ) &&
+			tile_index <= uint32_t( std::numeric_limits<int>::max() ), "Tile index is out of range" );
+		auto reason = std::string{};
+		const auto stored = state.remote_->PutTile( state.pyramid_, int( level_index ), int( tile_index ),
+			static_cast<const uint8_t *>( data ), size, &reason );
+		require( stored, reason.c_str() );
+	} );
+}
+
+
+pyra_status pyra_take_missing_tiles ( pyra_wsi *wsi, pyra_tile_id *tiles,
+	size_t capacity, size_t *count, pyra_error *error )
+{
+	if (count)
+		*count = 0;
+	return api_call( error, [&] {
+		require( wsi && count && ( tiles || capacity == 0 ), "Slide, tile array, and count output are required" );
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		auto &state = *wsi->state_;
+		require( state.remote_ != nullptr, "Only a remote slide has missing tiles", PYRA_UNSUPPORTED );
+		const auto taken = state.remote_->TakeMissing( state.pyramid_, capacity );
+		for (size_t i = 0; i < taken.size(); ++i)
+			tiles[i] = { uint32_t( taken[i].level_no ), uint32_t( taken[i].tile_no ) };
+		*count = taken.size();
+	} );
+}
+
+
+namespace {
+
+// Calls `f` with a value of the C++ pixel type of an integer public format.
+template <typename F>
+void visit_integer_format ( pyra_pixel_format format, F &&f )
+{
+	switch (format) {
+	case PYRA_PIXEL_RGB8: f( priml::Rgb8{} ); return;
+	case PYRA_PIXEL_RGB16: f( priml::Rgb16{} ); return;
+	case PYRA_PIXEL_GRAY8: f( uint8_t{} ); return;
+	case PYRA_PIXEL_GRAY16: f( uint16_t{} ); return;
+	default: throw ApiFailure{ PYRA_UNSUPPORTED, "Pixel format must be RGB8, RGB16, GRAY8 or GRAY16" };
+	}
+}
+
+
+// The rows of a caller's buffer, checked to hold `width` x `height` of `Pixel`.
+template <typename Pixel>
+const unsigned char *checked_rows ( const pyra_image_buffer &buffer, uint32_t width, uint32_t height )
+{
+	require( buffer.data && width > 0 && height > 0 && width <= uint32_t( std::numeric_limits<int>::max() ) &&
+		height <= uint32_t( std::numeric_limits<int>::max() ), "Image buffer and size are required" );
+	const auto row = size_t( width ) * sizeof( Pixel );
+	require( buffer.row_stride_bytes >= row && buffer.capacity_bytes >= buffer.row_stride_bytes * ( height - 1 ) + row,
+		"Image buffer is too small", PYRA_BUFFER_TOO_SMALL );
+	return static_cast<const unsigned char *>( buffer.data );
+}
+
+} // namespace
+
+
+pyra_status pyra_encode_image ( const pyra_image_buffer *source, uint32_t width, uint32_t height,
+	pyra_codec codec, uint32_t quality, pyra_bytes_fn sink, void *user, pyra_error *error )
+{
+	return api_call( error, [&] {
+		require( source && source->struct_size >= sizeof( *source ) && sink, "Source buffer and byte sink are required" );
+		const auto internal = codec_from_c( codec );
+		require( priml::img_codec_can_encode( internal ), "This build cannot encode the requested codec", PYRA_UNSUPPORTED );
+		require( quality >= 1 && quality <= PYRA_QUALITY_LOSSLESS, "Quality must be 1..100 or PYRA_QUALITY_LOSSLESS" );
+		visit_integer_format( source->pixel_format, [&] ( auto pixel ) {
+			using Pixel = decltype( pixel );
+			const auto *rows = checked_rows<Pixel>( *source, width, height );
+			auto image = priml::Pwhl<Pixel>( priml::Dim2D<int>{ int( width ), int( height ) }, priml::uninit );
+			for (auto y = 0u; y < height; ++y)
+				std::memcpy( image.rowp( int( y ) ), rows + size_t( y ) * source->row_stride_bytes, size_t( width ) * sizeof( Pixel ) );
+			auto options = priml::TileEncodeOptions{};
+			options.quality = int( quality );
+			auto bytes = std::vector<uint8_t>{};
+			auto reason = std::string{};
+			const auto encoded = priml::encode_tile( internal, image, &bytes, options, &reason );
+			require( encoded, reason.c_str(), PYRA_UNSUPPORTED );
+			sink( user, bytes.data(), bytes.size() );
+		} );
+	} );
+}
+
+
+pyra_status pyra_decode_image ( const void *data, size_t size, const pyra_image_buffer *destination,
+	uint32_t *width, uint32_t *height, pyra_error *error )
+{
+	return api_call( error, [&] {
+		require( data && size > 0 && width && height, "Codestream and size outputs are required" );
+		const auto *bytes = static_cast<const uint8_t *>( data );
+		if (!destination) {
+			auto info = priml::ImgCodecInfo{};
+			auto reason = std::string{};
+			const auto known = priml::read_img_codec_info( bytes, size, &info, &reason );
+			require( known && info.width > 0 && info.height > 0, reason.empty() ? "Unreadable codestream" : reason.c_str(),
+				PYRA_UNSUPPORTED );
+			*width = uint32_t( info.width );
+			*height = uint32_t( info.height );
+			return;
+		}
+		require( destination->struct_size >= sizeof( *destination ), "Invalid destination buffer structure" );
+		visit_integer_format( destination->pixel_format, [&] ( auto pixel ) {
+			using Pixel = decltype( pixel );
+			auto image = priml::Pwhl<Pixel>{};
+			require( priml::decode_to_image( bytes, size, image ), "The codestream could not be decoded", PYRA_UNSUPPORTED );
+			*width = uint32_t( image.w );
+			*height = uint32_t( image.h );
+			const auto *rows = checked_rows<Pixel>( *destination, *width, *height );
+			for (auto y = 0; y < image.h; ++y)
+				std::memcpy( const_cast<unsigned char *>( rows ) + size_t( y ) * destination->row_stride_bytes, image.rowp( y ),
+					size_t( image.w ) * sizeof( Pixel ) );
+		} );
 	} );
 }

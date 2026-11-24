@@ -104,10 +104,10 @@ bool czi_runtime_available ()
 }
 
 
-// Per-level libCZI state, kept index-parallel to pyramid.levels. sub_blocks is
-// parallel to Level::tiles, mapping a tile back to the sub-block it came from;
-// Tile::foff carries the same index, the way wsi_dcm.cpp carries a pixel-item
-// index there.
+// libCZI state. sub_blocks maps every tile of every level to the sub-block it
+// came from; Tile::foff is the tile's position in it, the way wsi_dcm.cpp
+// carries a pixel-item index there. One list for all levels, so a tile names
+// its sub-block without knowing its level.
 struct CziState {
 	std::shared_ptr<libCZI::IStream> stream;
 	std::shared_ptr<libCZI::ICZIReader> reader;
@@ -115,7 +115,7 @@ struct CziState {
 	libCZI::PixelType pixel_type = libCZI::PixelType::Invalid;
 	float black = 0.0f;
 	float white = 1.0f;
-	std::vector<std::vector<int>> sub_blocks;
+	std::vector<int> sub_blocks;
 };
 
 
@@ -845,17 +845,17 @@ bool CziLoader::Open ( Ppyr &pyramid )
 		set_level_bounds( level );
 //
 // set_level_bounds reorders the tiles, so the sub-block indices have to be
-// permuted with them: Tile::foff is the position each tile held in `indices`.
-		auto ordered = std::vector<int>( indices.size() );
-		for (size_t i = 0; i < level.tiles.size(); ++i)
-			ordered[i] = indices[level.tiles[i].foff];
-		for (size_t i = 0; i < level.tiles.size(); ++i)
-			level.tiles[i].foff = i;
+// permuted with them: Tile::foff is the position each tile held in `indices`
+// until it becomes the tile's position in the slide-wide list.
+		for (auto &tile : level.tiles) {
+			const auto index = indices[tile.foff];
+			tile.foff = state_->sub_blocks.size();
+			state_->sub_blocks.push_back( index );
+		}
 
 		level.tile_buffer_bytes = max_fsz;
 
 		pyramid.levels.push_back( std::move( level ) );
-		state_->sub_blocks.push_back( std::move( ordered ) );
 	}
 
 	pyramid.mrct = { { 0, 0 },
@@ -902,51 +902,53 @@ bool CziLoader::LoadTile ( Ppyr &pyramid, int level_no,
 	int tile_no, unsigned worker_idx )
 {
 	return this->LoadCompressedTile( pyramid, level_no, tile_no, worker_idx,
-		[this, level_no] ( auto &level, auto &tile, uint8_t *dest, size_t &pos,
-			unsigned /*worker*/ ) {
-			(void)level;
-			if (level_no < 0 || level_no >= (int)state_->sub_blocks.size())
-				return false;
-			const auto &indices = state_->sub_blocks[level_no];
-			if (tile.foff >= indices.size())
-				return false;
-
-			try {
-				auto block = state_->reader->ReadSubBlock( indices[tile.foff] );
-				if (!block)
-					return false;
-
-				const void *data = nullptr;
-				auto size = size_t{ 0 };
-				block->DangerousGetRawData(
-					libCZI::ISubBlock::Data, data, size );
-				if (!data || size == 0)
-					return false;
-				if (size + (size_t)kCziTileHeaderBytes > tile.fsz)
-					return false;
-
-				const auto &info = block->GetSubBlockInfo();
-				auto w = (uint32_t)info.physicalSize.w;
-				auto h = (uint32_t)info.physicalSize.h;
-
-				dest[0] = 'C';  dest[1] = 'Z';  dest[2] = 'S';  dest[3] = 'B';
-				dest[4] = kCziTileHeaderVersion;
-				dest[5] = (uint8_t)info.GetCompressionMode();
-				dest[6] = (uint8_t)info.pixelType;
-				dest[7] = 0;
-				std::memcpy( dest + 8, &w, sizeof( w ) );
-				std::memcpy( dest + 12, &h, sizeof( h ) );
-				std::memcpy( dest + 16, &state_->black, sizeof( float ) );
-				std::memcpy( dest + 20, &state_->white, sizeof( float ) );
-				std::memcpy( dest + kCziTileHeaderBytes, data, size );
-				pos = (size_t)kCziTileHeaderBytes + size;
-				return true;
-			}
-			catch (const std::exception &e) {
-				pyr::plog( "wsi czi: sub-block read failed: %s\n", e.what() );
-				return false;
-			}
+		[this] ( const Level &level, const Tile &tile, uint8_t *dest, size_t &pos, unsigned worker ) {
+			return AssembleTile( level, tile, dest, pos, worker );
 		} );
+}
+
+
+bool CziLoader::AssembleTile ( const Level &, const Tile &tile, uint8_t *dest,
+	size_t &pos, unsigned )
+{
+	if (tile.foff >= state_->sub_blocks.size())
+		return false;
+
+	try {
+		auto block = state_->reader->ReadSubBlock( state_->sub_blocks[tile.foff] );
+		if (!block)
+			return false;
+
+		const void *data = nullptr;
+		auto size = size_t{ 0 };
+		block->DangerousGetRawData(
+			libCZI::ISubBlock::Data, data, size );
+		if (!data || size == 0)
+			return false;
+		if (size + (size_t)kCziTileHeaderBytes > tile.fsz)
+			return false;
+
+		const auto &info = block->GetSubBlockInfo();
+		auto w = (uint32_t)info.physicalSize.w;
+		auto h = (uint32_t)info.physicalSize.h;
+
+		dest[0] = 'C';  dest[1] = 'Z';  dest[2] = 'S';  dest[3] = 'B';
+		dest[4] = kCziTileHeaderVersion;
+		dest[5] = (uint8_t)info.GetCompressionMode();
+		dest[6] = (uint8_t)info.pixelType;
+		dest[7] = 0;
+		std::memcpy( dest + 8, &w, sizeof( w ) );
+		std::memcpy( dest + 12, &h, sizeof( h ) );
+		std::memcpy( dest + 16, &state_->black, sizeof( float ) );
+		std::memcpy( dest + 20, &state_->white, sizeof( float ) );
+		std::memcpy( dest + kCziTileHeaderBytes, data, size );
+		pos = (size_t)kCziTileHeaderBytes + size;
+		return true;
+	}
+	catch (const std::exception &e) {
+		pyr::plog( "wsi czi: sub-block read failed: %s\n", e.what() );
+		return false;
+	}
 }
 
 
