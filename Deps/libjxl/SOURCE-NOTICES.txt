@@ -1,0 +1,25 @@
+libjxl 0.11.0 (JPEG XL reference implementation), bundled for PyrA.
+
+Origin: https://github.com/libjxl/libjxl, tag v0.11.0, with its submodules
+  third_party/highway  457c891775a7397bdb0376bb1031e6e027af1c48 (Highway 1.2.0)
+  third_party/brotli   36533a866ed1ca4b75cf049f4521e4ec5fe24727
+  third_party/skcms    42030a771244ba67f86b1c1c76a6493f873c5f91
+
+The files present are unmodified. Removed because PyrA does not build them:
+  - .git metadata, testdata/, doc/, examples/, plugins/, debian/, CI and Bazel files
+  - the submodules lcms, libpng, zlib, libjpeg-turbo, sjpeg, googletest and
+    HEVCSoftware (skcms is the colour engine; no PNG/JPEG tools are built)
+  - Highway: g3doc/, docs/, debian/, .github/
+  - Brotli: everything but c/, scripts/, CMakeLists.txt, LICENSE and README.md
+    (tests, research, and the Java/JS/C#/Go/Python bindings)
+  - skcms: everything but skcms.cc, skcms.h, skcms_internal.h, src/, LICENSE
+    and README.chromium (tests, profiles, fuzzers, build files)
+tools/ stays because libjxl's CMakeLists.txt always adds it.
+
+Licenses:
+  libjxl   BSD-3-Clause, LICENSE; patent grant, PATENTS
+  Highway  Apache-2.0 or BSD-3-Clause, third_party/highway/LICENSE and LICENSE-BSD3
+  Brotli   MIT, third_party/brotli/LICENSE
+  skcms    BSD-3-Clause, third_party/skcms/LICENSE
+
+PyrA builds it with the options in ../libjxl_options.cmake.

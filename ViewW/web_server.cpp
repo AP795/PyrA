@@ -84,37 +84,47 @@ struct CodecName {
 	pyra_codec codec;
 	const char *name;
 	bool lossless;
+	bool lossy;
 };
 
 constexpr CodecName kCodecs[] = {
-	{ PYRA_CODEC_JPEG, "JPEG", false },
-	{ PYRA_CODEC_JPEG2000, "JPEG 2000", true },
-	{ PYRA_CODEC_HTJ2K, "HTJ2K", true },
-	{ PYRA_CODEC_JPEGXL, "JPEG XL", true },
+	{ PYRA_CODEC_JPEG, "JPEG", false, true },
+	{ PYRA_CODEC_JPEG2000, "JPEG 2000", true, true },
+	{ PYRA_CODEC_HTJ2K, "HTJ2K", true, true },
+	{ PYRA_CODEC_JPEGXL, "JPEG XL", true, true },
+	{ PYRA_CODEC_JPEGXR, "JPEG XR", true, true },
+	{ PYRA_CODEC_LZW, "LZW", true, false },
 };
 
+// Tile edge selecting an untiled TIFF.
+constexpr auto kUntiledTile = 0u;
 
-// The codecs this build can write, with the synthetic-slide defaults and limits.
+
+// The codecs this build can write, with the layouts each suits (tiled pyramid,
+// untiled TIFF), and the synthetic-slide defaults and limits.
 std::string synthetic_json ()
 {
 	auto defaults = pyra_synthetic_options{};
 	pyra_synthetic_options_init( &defaults );
 	auto codecs = std::string( "[" );
 	for (const auto &codec : kCodecs) {
-		if (!pyra_codec_can_encode( codec.codec ))
+		const auto tiled = pyra_synthetic_can_encode( codec.codec, PYRA_SYNTHETIC_TILE_MIN ) != 0;
+		const auto untiled = pyra_synthetic_can_encode( codec.codec, kUntiledTile ) != 0;
+		if (!tiled && !untiled)
 			continue;
 		if (codecs.size() > 1) codecs += ',';
-		codecs += std::format( "{{\"id\":{},\"name\":{},\"lossless\":{},\"dicom\":{}}}", codec.codec,
-			json_string( codec.name ), codec.lossless, pyra_synthetic_dicom_can_encode( codec.codec ) != 0 );
+		codecs += std::format( "{{\"id\":{},\"name\":{},\"lossless\":{},\"lossy\":{},\"dicom\":{},"
+			"\"tiled\":{},\"untiled\":{}}}", codec.codec, json_string( codec.name ), codec.lossless, codec.lossy,
+			pyra_synthetic_dicom_can_encode( codec.codec ) != 0, tiled, untiled );
 	}
 	return std::format( "{{\"codecs\":{}],\"width\":{},\"height\":{},\"tile\":{},\"z\":{},\"mpp\":{},"
 		"\"codec\":{},\"quality\":{},\"tile_min\":{},\"tile_max\":{},\"tile_step\":{},\"edge_max\":{},"
-		"\"z_max\":{},\"mpp_min\":{},\"mpp_max\":{},\"z_step\":{},\"z_step_min\":{},\"z_step_max\":{},"
+		"\"untiled_edge_max\":{},\"z_max\":{},\"mpp_min\":{},\"mpp_max\":{},\"z_step\":{},\"z_step_min\":{},\"z_step_max\":{},"
 		"\"focus\":{},\"nucleus\":{},\"nucleus_min\":{},\"nucleus_max\":{},\"spacing\":{},\"spacing_min\":{},"
 		"\"spacing_max\":{},\"positive\":{},\"tumour\":{},\"lymphocytes\":{}}}", codecs, defaults.width,
 		defaults.height, defaults.tile_edge, defaults.z_levels, defaults.mpp, defaults.codec, defaults.quality,
 		PYRA_SYNTHETIC_TILE_MIN, PYRA_SYNTHETIC_TILE_MAX, PYRA_SYNTHETIC_TILE_STEP, PYRA_SYNTHETIC_EDGE_MAX,
-		PYRA_SYNTHETIC_Z_MAX, PYRA_SYNTHETIC_MPP_MIN, PYRA_SYNTHETIC_MPP_MAX, defaults.z_step_um,
+		PYRA_SYNTHETIC_UNTILED_EDGE_MAX, PYRA_SYNTHETIC_Z_MAX, PYRA_SYNTHETIC_MPP_MIN, PYRA_SYNTHETIC_MPP_MAX, defaults.z_step_um,
 		PYRA_SYNTHETIC_Z_STEP_MIN_UM, PYRA_SYNTHETIC_Z_STEP_MAX_UM, defaults.focus_fraction,
 		defaults.nucleus_diameter_um, PYRA_SYNTHETIC_NUCLEUS_MIN_UM, PYRA_SYNTHETIC_NUCLEUS_MAX_UM,
 		defaults.nucleus_spacing_um, PYRA_SYNTHETIC_SPACING_MIN_UM, PYRA_SYNTHETIC_SPACING_MAX_UM,
@@ -122,8 +132,9 @@ std::string synthetic_json ()
 }
 
 
-// A bare file name for a generated slide with the selected format's extension.
-std::filesystem::path synthetic_file_name ( const std::string &name, const std::string &format )
+// A bare file name for a generated slide with the selected format's extension:
+// .dcm, .ptf, or .tif for an untiled image (.tiff is kept).
+std::filesystem::path synthetic_file_name ( const std::string &name, const std::string &format, bool untiled )
 {
 	const auto file = utf8_path( name );
 	if (name.empty() || name.find_first_of( "/\\:" ) != std::string::npos || name.find( '\0' ) != std::string::npos ||
@@ -134,11 +145,14 @@ std::filesystem::path synthetic_file_name ( const std::string &name, const std::
 	auto extension = utf8( file.extension() );
 	std::transform( extension.begin(), extension.end(), extension.begin(),
 		[] ( unsigned char ch ) { return static_cast<char>( std::tolower( ch ) ); } );
-	const auto desired = format == "dicom" ? ".dcm" : ".ptf";
-	if (extension == desired)
+	const auto desired = format == "dicom" ? ".dcm" : untiled ? ".tif" : ".ptf";
+	if (extension == desired || ( untiled && extension == ".tiff" ))
 		return file;
-	if (!format.empty() && ( extension == ".dcm" || extension == ".ptf" ))
+	if (!format.empty() && ( extension == ".dcm" || extension == ".ptf" || extension == ".tif" ||
+		extension == ".tiff" ))
+	{
 		return std::filesystem::path( file ).replace_extension( desired );
+	}
 	return std::filesystem::path( file ).concat( desired );
 }
 
@@ -341,10 +355,10 @@ public:
 		pyra_get_backend_info( PYRA_BACKEND_OPENSLIDE, &backend, nullptr );
 		json( response, "{\"root\":" + json_string( utf8( options_.root ) ) +
 			",\"initial_image\":" + json_string( options_.initial_image ) +
-			std::format( ",\"max_edge\":{},\"overview_edge\":{},\"openslide\":{},\"tbf_mib\":{},\"pbf_mib\":{},\"threads\":{},\"synthetic\":{},\"analyse\":{},\"client\":{},\"client_cache_mib\":{} }}",
+			std::format( ",\"max_edge\":{},\"overview_edge\":{},\"openslide\":{},\"tbf_mib\":{},\"pbf_mib\":{},\"threads\":{},\"synthetic\":{},\"analyse\":{},\"client\":{},\"client_cache_mib\":{},\"view_halo\":{},\"view_halo_max\":{} }}",
 				kMaxRenderEdge, kOverviewEdge, backend.available != 0, defaults.compressed_cache_bytes / kBytesPerMiB,
 				defaults.decoded_cache_bytes / kBytesPerMiB, defaults.decode_threads, synthetic_json(), analyser_.capabilities_json(),
-				PYRA_WEB_WITH_CLIENT != 0, kClientCacheMiB ) );
+				PYRA_WEB_WITH_CLIENT != 0, kClientCacheMiB, options_.view_halo_percent, kViewHaloMaxPercent ) );
 	}
 
 	// Starts writing a synthetic slide into a folder beneath the root; progress
@@ -357,12 +371,15 @@ public:
 		if (request.has_param( "format" ) && format != "ptf" && format != "dicom")
 			throw std::invalid_argument( "Choose PTF or DICOM" );
 		const auto dicom = format == "dicom";
-		const auto target = directory / synthetic_file_name( request.get_param_value( "name" ), format );
 		auto options = pyra_synthetic_options{};
 		pyra_synthetic_options_init( &options );
 		options.width = uint32_t( integer( request, "width", PYRA_SYNTHETIC_EDGE_MAX ) );
 		options.height = uint32_t( integer( request, "height", PYRA_SYNTHETIC_EDGE_MAX ) );
 		options.tile_edge = uint32_t( integer( request, "tile", PYRA_SYNTHETIC_TILE_MAX ) );
+		const auto untiled = options.tile_edge == kUntiledTile;
+		if (dicom && untiled)
+			throw std::invalid_argument( "DICOM needs a tile size; tile 0 writes an untiled TIFF" );
+		const auto target = directory / synthetic_file_name( request.get_param_value( "name" ), format, untiled );
 		options.z_levels = uint32_t( integer( request, "z", PYRA_SYNTHETIC_Z_MAX ) );
 		options.mpp = parameter( request, "mpp" );
 		options.codec = pyra_codec( integer( request, "codec", UINT32_MAX ) );

@@ -21,6 +21,7 @@
 
 bool run_wsi_buffers_tests ( std::ostream &console, std::ostream *file );
 bool run_ptf_subset_tests ( const std::filesystem::path &output );
+bool run_img_jxr_tests ( const std::filesystem::path &output );
 
 namespace {
 
@@ -205,6 +206,7 @@ int main ( int argc, char **argv )
 	}
 	auto passed = run_wsi_buffers_tests( std::cout, nullptr );
 	passed &= run_ptf_subset_tests( std::filesystem::path( argv[1] ) );
+	passed &= run_img_jxr_tests( std::filesystem::path( argv[1] ) );
 	passed &= run_case( "test_img_codec_jpeg_round_trip",
 		test_img_codec_jpeg_round_trip );
 #if USE_OPENJPEG

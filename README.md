@@ -43,7 +43,8 @@ Standalone tests, samples and benchmarks live in `Tests/`.
   gallery** button) lays a directory out and writes its `.glr` manifest.
 - Optional DICOM WSI and Zeiss CZI loaders (both require third-party
   libraries), and a DICOM WSI writer whose producer identity a host sets.
-- JPEG decoding, with optional JPEG 2000, HTJ2K (OpenJPH) and JPEG XL codecs.
+- JPEG decoding, with optional JPEG 2000, HTJ2K (OpenJPH) and JPEG XL codecs,
+  and JPEG XR (bundled jxrlib) for PTF tiles and CZI sub-blocks.
 - Tile caches in one of two layouts, chosen per context: one arena per cache
   for the whole slide, or one pool per level (see the C interface's
   `cache_topology`).
@@ -60,7 +61,8 @@ Standalone tests, samples and benchmarks live in `Tests/`.
   positive fraction, tumour area and the lymphocyte share are also
   adjustable, and `pyra_synthetic_count_nuclei` returns the matching ground
   truth (C API, command-line tool, and both test viewers' **Generate**
-  dialog).
+  dialog). Tile size 0 writes a plain untiled TIFF (one plane, LZW or JPEG)
+  instead.
 
 - `pyra_process`, a Python processing bridge for DICOM slides: your numpy or
   scikit-image script runs over the whole slide in parallel chunks, after an
@@ -86,9 +88,11 @@ OpenJPH, and DCMTK from source on Windows and Linux. The web target uses
 | --- | --- | --- |
 | `PYR_WITH_OPENJPEG` | ON | OpenJPEG 2.x |
 | `PYR_WITH_OPENJPH` | OFF | OpenJPH >= 0.33 (HTJ2K) |
-| `PYR_WITH_JXL` | OFF | libjxl >= 0.9 |
+| `PYR_WITH_JXL` | OFF | libjxl >= 0.9 (bundled: 0.11.0) |
 | `PYR_WITH_DCMTK` | OFF | DCMTK >= 3.7.0 (HTJ2K transfer syntaxes) |
 | `PYR_WITH_CZI` | OFF | libCZI, linked dynamically |
+| `PYR_WITH_JXR` | ON | None; bundled jxrlib (JPEG XR tiles, CZI sub-blocks) |
+| `PYR_WITH_ZSTD` | ON | None; bundled zstd decoder (CZI sub-blocks) |
 | `PYRA_WITH_OPENSLIDE` | OFF | OpenSlide >= 4.0.1, linked dynamically |
 | `BUILD_TESTING` | ON | None; tests generate their own small images |
 | `PYRA_BUILD_GUI_TEST` | OFF | Qt 6 Widgets; viewer and performance evaluator |
@@ -125,11 +129,16 @@ exported to applications linking `Pyra::pyra`.
 
 ### JPEG XL
 
-On Linux, `PYR_WITH_JXL` discovers libjxl through pkg-config. For a static SDK
-on Windows, also provide `PYRA_JXL_INCLUDE_DIR` (containing `jxl/decode.h`)
-and `PYRA_JXL_LIBRARY_DIR` (containing the `jxl`, `jxl_cms`, Brotli and
-Highway archives). The SDK must match the selected MSVC runtime and
-configuration.
+`PYR_WITH_JXL` uses libjxl 0.11.0, bundled in `Deps/libjxl` (BSD-3-Clause,
+with its copies of Brotli, Highway and skcms), from the bundled SDK:
+`Deps/build_windows.ps1` builds it into `out/Deps/windows/jxl/{Release,Debug}`
+and `Deps/build.sh` (or an Emscripten configure of `Deps/`) into the Linux or
+browser-client SDK, which `PYRA_WINDOWS_SDK` / `PYRA_LINUX_SDK` then supply.
+Another static SDK can be selected with `PYRA_JXL_INCLUDE_DIR` (containing
+`jxl/decode.h`) and `PYRA_JXL_LIBRARY_DIR` (containing the `jxl`, `jxl_cms`,
+Brotli and Highway archives); on Windows it must match the selected MSVC runtime
+and configuration. A Linux build without a bundled SDK discovers libjxl >= 0.9
+through pkg-config (Ubuntu 24.04 ships 0.7, too old).
 
 ### Optional OpenSlide backend
 
@@ -260,7 +269,7 @@ successfully opened image under Qt's user configuration location
 (`~/.config/pyra_gui_test/` on Linux), restoring that image on the next normal
 start.
 
-The optional `pyra_web_test` viewer in `ViewW/` runs without Qt. A local
+The optional `PyrA_Web_Viewer` viewer in `ViewW/` runs without Qt. A local
 C++ server renders slides through the PyrA C API, and the browser provides pan,
 zoom, a minimap, metadata, and channel/Z selection. The image directory defaults
 to the source checkout's `tst_in/`. Set `PYRA_VIEWER_IMAGE_DIRECTORY` in CMake
@@ -272,7 +281,7 @@ for CMake, WSL, and launch options.
 
 ```sh
 bash ViewW/build_linux.sh
-out/build/linux-web/install/bin/pyra_web_test --root /path/to/images
+out/build/linux-web/install/bin/PyrA_Web_Viewer --root /path/to/images
 ```
 
 Open `http://127.0.0.1:8765/` in your browser.

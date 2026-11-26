@@ -10,9 +10,14 @@ const canvas = $('view');
 const context = canvas.getContext('2d', {alpha: false});
 const mini = $('minimap');
 const miniContext = mini.getContext('2d');
+// The toolbar's halo percentage, remembered by this browser; the server's
+// --view-halo (config view_halo, limit view_halo_max) is the default.
+const kHaloStorageKey = 'pyra.viewHalo';
+// Views are rendered at most this often while navigating, not after it stops.
+const kRenderDelayMs = 35;
 const state = {
-	config: null, image: null, plane: null, zPlanes: [], generation: 0, epoch: 0, revision: 0,
-	x: 0, y: 0, mpp: 1, frame: null, overview: null,
+	config: null, image: null, plane: null, zPlanes: [], generation: 0, epoch: 0,
+	x: 0, y: 0, mpp: 1, frame: null, inflight: null, overview: null, halo: 0,
 	busy: false, opening: false, generating: false, analysing: false, openOptions: null, notice: null,
 	pendingOpen: null, pendingOverview: null, pendingRender: null,
 	drag: null, miniDrag: false, folder: '', folderRequest: 0, timer: null
@@ -71,25 +76,87 @@ function viewRequest() {
 	const {width, height} = dimensions();
 	const scale = Math.max(1, width / state.config.max_edge, height / state.config.max_edge);
 	return {
-		epoch: state.epoch, revision: state.revision, generation: state.generation,
+		epoch: state.epoch, generation: state.generation,
 		plane: state.plane.index, x: state.x - width * state.mpp / 2,
 		y: state.y - height * state.mpp / 2, width: width * state.mpp,
 		height: height * state.mpp, mpp: state.mpp * scale
 	};
 }
 
+// Halo band rendered around the visible view on every side, as a percentage of
+// the view's raster width, so slow panning moves over pixels already rendered.
+function haloPercent(value) {
+	const percent = Math.round(Number(value));
+	return Number.isFinite(percent) ? Math.min(Math.max(percent, 0), state.config.view_halo_max) : state.config.view_halo;
+}
+
+function setupHalo() {
+	let saved = null;
+	try { saved = globalThis.localStorage?.getItem(kHaloStorageKey) ?? null; } catch (_) { /* Storage blocked. */ }
+	state.halo = haloPercent(saved ?? state.config.view_halo);
+	$('halo').max = state.config.view_halo_max;
+	$('halo').value = state.halo;
+}
+
+// A new halo applies at once: frames of another halo no longer serve (servesView).
+function haloChanged() {
+	state.halo = haloPercent($('halo').value);
+	$('halo').value = state.halo;
+	try { globalThis.localStorage?.setItem(kHaloStorageKey, String(state.halo)); } catch (_) { /* Storage blocked. */ }
+	if (state.plane) changed();
+}
+
+// The view plus its halo band, capped per axis at the raster edge limit.
+function haloRequest(view) {
+	const width = Math.ceil(view.width / view.mpp);
+	const height = Math.ceil(view.height / view.mpp);
+	const band = Math.ceil(width * state.halo / 100);
+	const edge = state.config.max_edge;
+	const bandX = Math.max(0, Math.min(band, Math.floor((edge - width) / 2))) * view.mpp;
+	const bandY = Math.max(0, Math.min(band, Math.floor((edge - height) / 2))) * view.mpp;
+	return {...view, x: view.x - bandX, y: view.y - bandY, width: view.width + 2 * bandX,
+		height: view.height + 2 * bandY, halo: state.halo};
+}
+
+// A prepared rectangle of the current halo serves the view until the view has
+// used up half of its actual halo on any side; without a halo, until the view
+// leaves it.
+function servesView(prepared, view) {
+	if (!prepared || prepared.epoch !== view.epoch || prepared.generation !== view.generation ||
+		prepared.plane !== view.plane || prepared.mpp !== view.mpp || prepared.halo !== state.halo) return false;
+	const marginX = Math.max(0, (prepared.width - view.width) / 4);
+	const marginY = Math.max(0, (prepared.height - view.height) / 4);
+	return prepared.x <= view.x - marginX && prepared.y <= view.y - marginY &&
+		prepared.x + prepared.width >= view.x + view.width + marginX &&
+		prepared.y + prepared.height >= view.y + view.height + marginY;
+}
+
+// The shown complete frame or the request in flight already serves the view.
+function needsRender(view) {
+	return !(state.frame?.complete && servesView(state.frame.request, view)) && !servesView(state.inflight, view);
+}
+
+function cancelRenderTimer() {
+	clearTimeout(state.timer);
+	state.timer = null;
+}
+
 function changed() {
-	++state.revision;
 	updateLabels();
 	draw();
-	clearTimeout(state.timer);
+	if (!state.plane || state.timer !== null || !needsRender(viewRequest())) return;
 	state.timer = setTimeout(() => {
+		state.timer = null;
 		if (!state.plane || state.opening) return;
-		if (clientUsable()) { sendClientView(viewRequest()); return; }
-		if (clientDecodes()) { sendClientView(viewRequest(), 'server'); return; }
-		state.pendingRender = viewRequest();
+		const view = viewRequest();
+		if (!needsRender(view)) return;
+		const request = haloRequest(view);
+		state.inflight = request;
+		if (clientUsable()) { sendClientView(request); return; }
+		if (clientDecodes()) { sendClientView(request, 'server'); return; }
+		state.pendingRender = request;
 		pump();
-	}, 35);
+	}, kRenderDelayMs);
 }
 
 // Browser rendering (client_worker.js): the worker holds a WebAssembly copy of
@@ -137,6 +204,7 @@ async function clientMessage(message) {
 	} else if (message.type === 'error') {
 		if (message.plane >= 0) client.failedPlanes.add(message.plane);
 		else client.ready = false;
+		state.inflight = null;
 		status(`Browser rendering unavailable (${message.message}); the server renders instead.`);
 		changed();
 	} else if (message.type === 'frame') {
@@ -149,7 +217,7 @@ async function clientMessage(message) {
 		if (request.epoch !== state.epoch || request.id < client.shown) { bitmap.close(); return; }
 		client.shown = request.id;
 		state.frame?.bitmap.close();
-		state.frame = {bitmap, request};
+		state.frame = {bitmap, request, complete: message.complete};
 		draw();
 		$('render-time').textContent = `${message.ms.toFixed(2)} ms (${message.server ? 'server' : 'browser'})`;
 		$('total-time').textContent = `${(performance.now() - request.started).toFixed(2)} ms`;
@@ -260,7 +328,7 @@ function selectPlane(preserveView = false) {
 	state.plane = selectedPlane();
 	updateZSlider();
 	++state.epoch;
-	state.pendingRender = null;
+	state.pendingRender = state.inflight = null;
 	state.frame?.bitmap.close();
 	state.overview?.close();
 	state.frame = state.overview = null;
@@ -270,7 +338,7 @@ function selectPlane(preserveView = false) {
 }
 
 async function pixels(request) {
-	const params = new URLSearchParams(Object.entries(request).filter(([key]) => key !== 'epoch' && key !== 'revision'));
+	const params = new URLSearchParams(Object.entries(request).filter(([key]) => key !== 'epoch' && key !== 'halo'));
 	const started = performance.now();
 	const response = await api(`/api/render?${params}`);
 	const width = Number(response.headers.get('X-Pyra-Width'));
@@ -332,11 +400,15 @@ async function pump() {
 		if (kind === 'open') await doOpen(task);
 		else {
 			const frame = await pixels(task);
-			if (task.epoch !== state.epoch || (kind === 'view' && task.revision !== state.revision)) frame.bitmap.close();
+// A view frame stays useful after the view moved on: draw() places it by its
+// own rectangle, and a newer view is already scheduled if it no longer serves.
+			if (task.epoch !== state.epoch) frame.bitmap.close();
 			else if (kind === 'overview') {
 				state.overview?.close(); state.overview = frame.bitmap; drawMini();
 			} else {
-				state.frame?.bitmap.close(); state.frame = {bitmap: frame.bitmap, request: task}; draw();
+				state.frame?.bitmap.close();
+				state.frame = {bitmap: frame.bitmap, request: task, complete: !frame.incomplete};
+				draw();
 				$('render-time').textContent = `${frame.nativeMs.toFixed(2)} ms`;
 				$('total-time').textContent = `${(performance.now() - frame.started).toFixed(2)} ms`;
 				$('transfer').textContent = `${(frame.bytes / 1048576).toFixed(2)} MiB`;
@@ -345,6 +417,7 @@ async function pump() {
 			}
 		}
 	} catch (error) {
+		if (kind === 'view' && state.inflight === task) state.inflight = null;
 		if (task.epoch === state.epoch) {
 			status(error.message);
 			if (kind === 'open') {
@@ -368,7 +441,7 @@ function requestOpen(backend = $('backend').value) {
 	state.opening = true;
 	updateControls();
 	state.pendingOverview = state.pendingRender = null;
-	clearTimeout(state.timer);
+	cancelRenderTimer();
 	++state.epoch;
 	state.pendingOpen = {epoch: state.epoch, options: {
 		path: $('path').value, backend, tbf_mib: $('tbf').value,
@@ -387,7 +460,7 @@ function reloadImage(message) {
 	state.opening = true;
 	updateControls();
 	state.pendingOverview = state.pendingRender = null;
-	clearTimeout(state.timer);
+	cancelRenderTimer();
 	++state.epoch;
 	state.pendingOpen = {epoch: state.epoch, options: {...state.openOptions}, reload: true};
 	pump();
@@ -468,7 +541,7 @@ function setupGenerate() {
 	for (const [id, value, min, max, step] of [
 		['generate-width', synthetic.width, 1, synthetic.edge_max, 1],
 		['generate-height', synthetic.height, 1, synthetic.edge_max, 1],
-		['generate-tile', synthetic.tile, synthetic.tile_min, synthetic.tile_max, synthetic.tile_step],
+		['generate-tile', synthetic.tile, 0, synthetic.tile_max, synthetic.tile_step],
 		['generate-z', synthetic.z, 1, synthetic.z_max, 1],
 		['generate-mpp', synthetic.mpp, synthetic.mpp_min, synthetic.mpp_max, 0.001],
 		['generate-z-step', synthetic.z_step, synthetic.z_step_min, synthetic.z_step_max, 0.05],
@@ -484,12 +557,38 @@ function setupGenerate() {
 	$('generate-dicom').disabled = !synthetic.codecs.some(codec => codec.dicom);
 	$('generate-dicom').title = $('generate-dicom').disabled ? 'DICOM generation needs a build with DCMTK' : '';
 	$('generate-format').value = 'ptf';
+	state.generateTile = synthetic.tile;
 	updateGenerateFormat(synthetic.codec);
 }
 
+function generateUntiled() { return Number($('generate-tile').value) === 0; }
+function isUntiledImage(path) { return /\.tiff?$/i.test(path || ''); }
+
+// Tile edges between 0 (untiled) and the minimum do not exist: stepping down from
+// the minimum lands on 0, stepping up from 0 on the minimum.
+function snapGenerateTile() {
+	const tile = $('generate-tile');
+	const minimum = state.config.synthetic.tile_min;
+	const value = Number(tile.value);
+	if (value > 0 && value < minimum) tile.value = value > state.generateTile ? minimum : 0;
+	state.generateTile = Number(tile.value);
+	updateGenerateFormat($('generate-codec').value);
+}
+
 function updateGenerateFormat(preferredCodec) {
+	const synthetic = state.config.synthetic;
+	const untiled = generateUntiled();
+	$('generate-dicom').disabled = untiled || !synthetic.codecs.some(codec => codec.dicom);
+	if (untiled && $('generate-format').value === 'dicom') $('generate-format').value = 'ptf';
+	$('generate-format').options[0].textContent = untiled ? 'TIFF (untiled)' : 'PTF';
 	const dicom = $('generate-format').value === 'dicom';
-	const codecs = state.config.synthetic.codecs.filter(codec => !dicom || codec.dicom);
+	if (untiled) $('generate-z').value = 1;
+	$('generate-z').disabled = state.generating || untiled;
+	for (const id of ['generate-width', 'generate-height']) {
+		$(id).max = untiled ? synthetic.untiled_edge_max : synthetic.edge_max;
+		if (Number($(id).value) > Number($(id).max)) $(id).value = $(id).max;
+	}
+	const codecs = synthetic.codecs.filter(codec => dicom ? codec.dicom && codec.tiled : untiled ? codec.untiled : codec.tiled);
 	$('generate-codec').replaceChildren(...codecs.map(codec => {
 		const option = document.createElement('option');
 		option.value = codec.id; option.textContent = codec.name;
@@ -498,16 +597,19 @@ function updateGenerateFormat(preferredCodec) {
 	const preferred = codecs.find(codec => String(codec.id) === String(preferredCodec));
 	$('generate-codec').value = preferred?.id ?? codecs[0]?.id ?? '';
 	const name = $('generate-name');
-	if (name.value)
-		name.value = name.value.replace(/\.(?:ptf|dcm)$/i, '') + (dicom ? '.dcm' : '.ptf');
+	if (name.value && !(untiled && /\.tiff$/i.test(name.value)))
+		name.value = name.value.replace(/\.(?:ptf|dcm|tiff?)$/i, '') + (dicom ? '.dcm' : untiled ? '.tif' : '.ptf');
 	updateGenerateQuality();
 }
 
+// LZW is lossless only; JPEG has no lossless mode.
 function updateGenerateQuality() {
 	const codec = state.config.synthetic.codecs.find(item => String(item.id) === String($('generate-codec').value));
 	const canLossless = Boolean(codec?.lossless);
+	const lossy = codec?.lossy !== false;
 	if (!canLossless) $('generate-lossless').checked = false;
-	$('generate-lossless').disabled = state.generating || !canLossless;
+	if (!lossy) $('generate-lossless').checked = true;
+	$('generate-lossless').disabled = state.generating || !canLossless || !lossy;
 	$('generate-quality').disabled = state.generating || $('generate-lossless').checked;
 }
 
@@ -516,7 +618,8 @@ function setGenerating(generating) {
 	for (const id of generateFields) $(id).disabled = generating;
 	$('generate-submit').disabled = generating;
 	$('generate').disabled = generating && !$('generate-dialog').open;
-	updateGenerateQuality();
+	if (generating) updateGenerateQuality();
+	else updateGenerateFormat($('generate-codec').value);
 }
 
 function showGenerate() {
@@ -532,12 +635,15 @@ function showGenerate() {
 async function pollGenerate() {
 	const progress = await (await api('/api/generate')).json();
 	if (progress.total) { $('generate-progress').max = progress.total; $('generate-progress').value = progress.done; }
-	status(`Generating ${progress.path} · ${progress.done} / ${progress.total || '…'} tiles`);
+	const untiled = isUntiledImage(progress.path);
+	status(`Generating ${progress.path} · ${progress.done} / ${progress.total || '…'} ${untiled ? 'strips' : 'tiles'}`);
 	if (progress.running) { setTimeout(() => pollGenerate().catch(failGenerate), 250); return; }
 	setGenerating(false);
 	if (progress.error) { failGenerate(new Error(progress.error)); return; }
 	$('generate-dialog').close();
 	status(`Generated ${progress.path}`);
+// An untiled TIFF is not a slide: it opens through a gallery (Make gallery).
+	if (untiled) { await showFolder(state.folder); return; }
 	$('path').value = progress.path;
 	requestOpen(isDicom(progress.path) ? '0' : $('backend').value);
 }
@@ -550,6 +656,7 @@ function failGenerate(error) {
 
 $('generate').addEventListener('click', showGenerate);
 $('generate-format').addEventListener('change', () => updateGenerateFormat($('generate-codec').value));
+$('generate-tile').addEventListener('change', snapGenerateTile);
 $('generate-codec').addEventListener('change', updateGenerateQuality);
 $('generate-lossless').addEventListener('change', updateGenerateQuality);
 $('generate-close').addEventListener('click', () => $('generate-dialog').close());
@@ -747,6 +854,7 @@ $('z-slider').addEventListener('input', () => {
 });
 $('backend').addEventListener('change', () => { $('tbf').disabled = $('threads').disabled = $('backend').value === '1'; });
 $('fit').addEventListener('click', fit);
+$('halo').addEventListener('change', haloChanged);
 $('native').addEventListener('click', nativeSize);
 $('zoom-in').addEventListener('click', () => zoom(1 / 1.25));
 $('zoom-out').addEventListener('click', () => zoom(1.25));
@@ -826,6 +934,7 @@ async function start() {
 		$('pbf').value = state.config.pbf_mib;
 		$('threads').value = state.config.threads;
 		$('backend').options[1].disabled = !state.config.openslide;
+		setupHalo();
 		setupGenerate();
 		setupAnalyse();
 		$('connection').textContent = 'Local connection';

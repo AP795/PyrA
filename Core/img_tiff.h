@@ -32,6 +32,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -115,5 +116,36 @@ template <typename pixeltype>
 bool tiff_image_write_lossless ( const std::filesystem::path &path,
 	const Pwhl<pixeltype> &image, TiffLosslessCodec codec,
 	const std::filesystem::path &tags_from, std::string *error = nullptr );
+
+
+// How tiff_image_write_strips codes its strips: LZW with the horizontal
+// predictor (lossless), or JPEG over YCbCr 4:2:0, which libtiff and every TIFF
+// reader decode. Both are ordinary TIFF compressions, unlike the codec strips above.
+enum class TiffStripCodec { Lzw, Jpeg };
+
+// JPEG-in-TIFF YCbCr 4:2:0 codes 16-row MCUs; a strip height must be a multiple.
+inline constexpr int kTiffJpegStripRowStep = 16;
+
+struct TiffStripSpec {
+	Dim2D<int> size{ 0, 0 };
+	int rows_per_strip = 0;
+	TiffStripCodec codec = TiffStripCodec::Lzw;
+// 1..100, JPEG only.
+	int quality = 90;
+// Microns per pixel for the resolution tags; 0 writes none.
+	double mpp = 0.0;
+	std::string software;
+};
+
+// Fills `out`, sized to `strip_rect` (full width, rows_per_strip rows or fewer at
+// the bottom). Return false to stop the write.
+using TiffStripFetch = std::function<bool ( const Rtlbr<int> &strip_rect, Pwhl<Rgb> *out )>;
+
+// Write an untiled single-page RGB8 TIFF at `path`, pulling its strips top to
+// bottom so only one strip is held at a time. Classic TIFF: the caller keeps the
+// image under 4 GiB. A cancelled or failed write removes the file; a stopped fetch
+// leaves `error` as "cancelled".
+bool tiff_image_write_strips ( const std::filesystem::path &path, const TiffStripSpec &spec,
+	const TiffStripFetch &fetch, std::string *error = nullptr );
 
 } // namespace priml

@@ -13,6 +13,9 @@
 namespace pyra::web {
 
 inline constexpr auto kMaxRenderEdge = 4096u;
+// Halo band around each viewer frame, percent of the view's raster width.
+inline constexpr auto kViewHaloDefaultPercent = 20;
+inline constexpr auto kViewHaloMaxPercent = 50;
 inline constexpr auto kOverviewEdge = 256u;
 //
 // HTTP workers, and requests that may wait for one. cpp-httplib holds a worker
@@ -77,6 +80,10 @@ struct ServerOptions {
 // with that Host and Origin are accepted beside the loopback ones. The session
 // token is still required. Empty: loopback only.
 	std::string public_origin;
+//
+// Default halo band of the viewer's frames, percent of the view width per side
+// (0..kViewHaloMaxPercent). Each browser can change it from the toolbar.
+	int view_halo_percent = kViewHaloDefaultPercent;
 };
 
 class Server {

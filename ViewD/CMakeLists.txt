@@ -12,32 +12,32 @@ target_compile_definitions(pyra_gui_support PRIVATE PYRA_GUI_IMAGE_DIRECTORY="${
 add_executable(pyra_fixture_writer fixture_writer_main.cpp test_fixture.cpp)
 target_link_libraries(pyra_fixture_writer PRIVATE pyra_core Qt6::Core)
 
-add_executable(pyra_gui_test main.cpp viewer_window.cpp viewer_window.h
+add_executable(PyrA_Desktop_Viewer main.cpp viewer_window.cpp viewer_window.h
 	viewport.cpp viewport.h minimap.cpp minimap.h open_wsi_dialog.cpp open_wsi_dialog.h
 	generate_wsi_dialog.cpp generate_wsi_dialog.h pyra.qrc)
-target_sources(pyra_gui_test PRIVATE cache_usage_widget.cpp cache_usage_widget.h)
-set_target_properties(pyra_gui_test PROPERTIES AUTOMOC ON AUTORCC ON)
-target_compile_definitions(pyra_gui_test PRIVATE PYRA_GUI_LOG_DIRECTORY="${PROJECT_BINARY_DIR}/logs")
+target_sources(PyrA_Desktop_Viewer PRIVATE cache_usage_widget.cpp cache_usage_widget.h)
+set_target_properties(PyrA_Desktop_Viewer PROPERTIES AUTOMOC ON AUTORCC ON)
+target_compile_definitions(PyrA_Desktop_Viewer PRIVATE PYRA_GUI_LOG_DIRECTORY="${PROJECT_BINARY_DIR}/logs")
 if(WIN32)
 	enable_language(RC)
-	target_sources(pyra_gui_test PRIVATE pyra.rc)
-	set_target_properties(pyra_gui_test PROPERTIES WIN32_EXECUTABLE ON)
+	target_sources(PyrA_Desktop_Viewer PRIVATE pyra.rc)
+	set_target_properties(PyrA_Desktop_Viewer PROPERTIES WIN32_EXECUTABLE ON)
 	if(TARGET Qt6::QICOPlugin)
-		add_custom_command(TARGET pyra_gui_test POST_BUILD
-			COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:pyra_gui_test>/imageformats
+		add_custom_command(TARGET PyrA_Desktop_Viewer POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:PyrA_Desktop_Viewer>/imageformats
 			COMMAND ${CMAKE_COMMAND} -E copy_if_different
-				$<TARGET_FILE:Qt6::QICOPlugin> $<TARGET_FILE_DIR:pyra_gui_test>/imageformats)
+				$<TARGET_FILE:Qt6::QICOPlugin> $<TARGET_FILE_DIR:PyrA_Desktop_Viewer>/imageformats)
 	endif()
 endif()
-target_link_libraries(pyra_gui_test PRIVATE pyra_gui_support Qt6::Widgets)
-add_dependencies(pyra_gui_test pyra_fixture_writer)
+target_link_libraries(PyrA_Desktop_Viewer PRIVATE pyra_gui_support Qt6::Widgets)
+add_dependencies(PyrA_Desktop_Viewer pyra_fixture_writer)
 
 if(MSVC)
 	target_compile_options(pyra_gui_support PRIVATE /W4 /permissive- /utf-8)
-	target_compile_options(pyra_gui_test PRIVATE /W4 /permissive- /utf-8)
+	target_compile_options(PyrA_Desktop_Viewer PRIVATE /W4 /permissive- /utf-8)
 else()
 	target_compile_options(pyra_gui_support PRIVATE -Wall -Wextra)
-	target_compile_options(pyra_gui_test PRIVATE -Wall -Wextra)
+	target_compile_options(PyrA_Desktop_Viewer PRIVATE -Wall -Wextra)
 endif()
 
 if(BUILD_TESTING)
@@ -66,7 +66,7 @@ if(BUILD_TESTING)
 	if(PYRA_WITH_OPENSLIDE)
 		set_tests_properties(pyra_evaluator PROPERTIES FIXTURES_REQUIRED "pyra_wsi_fixture;pyra_image_fixture;pyra_openslide_fixture")
 	endif()
-	add_test(NAME pyra_gui_smoke COMMAND pyra_gui_test --smoke-test
+	add_test(NAME pyra_gui_smoke COMMAND PyrA_Desktop_Viewer --smoke-test
 		"${PYRA_TEST_OUTPUT_DIRECTORY}/ViewD/gui")
 	set_tests_properties(pyra_gui_smoke PROPERTIES
 		ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 40)
@@ -88,7 +88,7 @@ if(BUILD_TESTING)
 endif()
 
 if(WIN32)
-	foreach(gui_target pyra_gui_test pyra_fixture_writer pyra_logging_test pyra_settings_test pyra_minimap_test pyra_evaluator_test pyra_viewer_behavior_test)
+	foreach(gui_target PyrA_Desktop_Viewer pyra_fixture_writer pyra_logging_test pyra_settings_test pyra_minimap_test pyra_evaluator_test pyra_viewer_behavior_test)
 		if(TARGET ${gui_target})
 			add_custom_command(TARGET ${gui_target} POST_BUILD
 				COMMAND ${CMAKE_COMMAND} -E copy_if_different

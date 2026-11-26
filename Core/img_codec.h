@@ -53,11 +53,18 @@ inline constexpr int kImageDefaultLossyQuality = 90;
 // page of a member TIFF or a small sidecar, read with libtiff page-wise so only
 // its own bytes leave the disk, and at a few KB decoding it in the loader costs
 // less than shipping the container.
-enum class ImgCodec { None, Jpeg, Jp2k, JpegLs, Jxl, CziSubBlock, Tiff, RawSamples, Htj2k, Last };
+//
+// JpegXr is a JPEG XR image in its TIFF-like container (img_jxr.h).
+//
+// Lzw is TIFF strip compression 5. It has no signature and is never a tile
+// payload: decode_tile never sees it and encode_tile cannot produce it. It names
+// the compression of an untiled TIFF written by tiff_image_write_strips (img_tiff.h).
+enum class ImgCodec { None, Jpeg, Jp2k, JpegLs, Jxl, CziSubBlock, Tiff, RawSamples, Htj2k, JpegXr, Lzw, Last };
 
 constexpr bool img_codec_supports_lossless ( ImgCodec codec ) noexcept
 {
-	return codec == ImgCodec::Jxl || codec == ImgCodec::Jp2k || codec == ImgCodec::Htj2k;
+	return codec == ImgCodec::Jxl || codec == ImgCodec::Jp2k || codec == ImgCodec::Htj2k ||
+		codec == ImgCodec::JpegXr;
 }
 
 
@@ -70,6 +77,7 @@ constexpr bool img_codec_can_encode ( ImgCodec codec ) noexcept
 	case ImgCodec::Jp2k: return USE_OPENJPEG != 0;
 	case ImgCodec::Htj2k: return USE_OPENJPH != 0;
 	case ImgCodec::Jxl: return USE_JXL != 0;
+	case ImgCodec::JpegXr: return USE_JXR != 0;
 	default: return false;
 	}
 }

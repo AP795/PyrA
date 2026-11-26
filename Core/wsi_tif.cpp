@@ -5,6 +5,7 @@
 #include "wsi.h"
 
 #include "gallery.h"
+#include "img_jxr.h"
 #include "img_tiff.h"
 #include "ptf_tags.h"
 #include "tiff_inc.h"
@@ -263,7 +264,8 @@ bool WsiTifLoader::Open ( Ppyr &pyramid )
 		auto compression = uint16_t{};
 		TIFFGetFieldDefaulted( tif, TIFFTAG_COMPRESSION, &compression );
 		const auto codec = compression == COMPRESSION_JXL ? ImgCodec::Jxl
-			: compression == COMPRESSION_JP2000 ? ImgCodec::Jp2k : ImgCodec::None;
+			: compression == COMPRESSION_JP2000 ? ImgCodec::Jp2k
+			: compression == kTiffCompressionJpegXr ? ImgCodec::JpegXr : ImgCodec::None;
 		if (img_codec_unavailable_reason( codec )) {
 			pyramid.unsupported_codec_->store( codec );
 			return false;

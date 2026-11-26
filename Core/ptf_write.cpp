@@ -4,6 +4,7 @@
 
 #include "ptf_write.h"
 
+#include "img_jxr.h"
 #include "pyr_rt.h"
 #include "tiff_inc.h"
 
@@ -95,6 +96,9 @@ bool compression_tag_local ( ImgCodec codec, uint16_t *tag ) noexcept
 		return true;
 	case ImgCodec::Jxl:
 		*tag = COMPRESSION_JXL;
+		return true;
+	case ImgCodec::JpegXr:
+		*tag = kTiffCompressionJpegXr;
 		return true;
 	default:
 		return false;
@@ -216,6 +220,9 @@ bool PtfWriter::begin_level ( const PtfLevelSpec &spec, std::string *error,
 		type == LevelPixelType::Float32)
 		return set_error_local( error,
 			std::string( img_codec_name( spec.codec ) ) + " PTF levels do not support Float32 pixels" );
+	if (!encoded && spec.codec == ImgCodec::JpegXr && type == LevelPixelType::Float32 &&
+		spec.encode.quality == kImageLosslessQuality)
+		return set_error_local( error, "JPEG XR has no lossless mode for Float32 pixels" );
 	TIFFSetField( tif, TIFFTAG_IMAGEWIDTH, (uint32_t)spec.size.w );
 	TIFFSetField( tif, TIFFTAG_IMAGELENGTH, (uint32_t)spec.size.h );
 	TIFFSetField( tif, TIFFTAG_TILEWIDTH, (uint32_t)spec.tile.w );

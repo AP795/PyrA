@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Alexandre Papine
 // SPDX-License-Identifier: MIT
 
-// End-to-end check of the browser client against a running pyra_web_test:
+// End-to-end check of the browser client against a running PyrA_Web_Viewer:
 // the WebAssembly client renders each view from the server's geometry and
 // stored tiles, and its RGBA must equal the server's own /api/render frame.
 //
@@ -62,13 +62,17 @@ async function main() {
 		const plane = image.planes[defaultPlane];
 		const fit = Math.max(plane.width / kView.width, plane.height / kView.height);
 		let tiles = 0, bytes = 0, views = 0, mismatches = 0, rounded = 0, passes = 0, htj2kBytes = 0, rawBytes = 0;
+// Time in the client's own decode and render calls, without transfers.
+		let clientMs = 0;
 		for (const mpp of [fit, fit / 4, Math.max(plane.mpp, fit / 16), plane.mpp]) {
 			const view = {x: plane.x + plane.width * 0.4 - kView.width * mpp / 2, y: plane.y + plane.height * 0.45 - kView.height * mpp / 2,
 				width: kView.width * mpp, height: kView.height * mpp, mpp};
 			let status = -1;
 			for (let pass = 0; pass < kMaxPasses; ++pass) {
 				++passes;
+				const renderStart = performance.now();
 				status = module._pyra_client_render(plane.index, view.x, view.y, view.width, view.height, view.mpp);
+				clientMs += performance.now() - renderStart;
 				if (status !== 0 && status !== 6) throw new Error(`${slide}: render ${module.UTF8ToString(module._pyra_client_error())}`);
 				let moved = 0;
 				for (;;) {
@@ -83,7 +87,9 @@ async function main() {
 						const data = new Uint8Array(bodies[i]);
 						const at = module._malloc(Math.max(1, data.length));
 						module.HEAPU8.set(data, at);
+						const putStart = performance.now();
 						const put = module._pyra_client_put(level, tile, at, data.length);
+						clientMs += performance.now() - putStart;
 						module._free(at);
 						if (put !== 0) throw new Error(`${slide}: put ${module.UTF8ToString(module._pyra_client_error())}`);
 						bytes += data.length;
@@ -140,7 +146,8 @@ async function main() {
 		if (mismatches) ++failed;
 		console.log(`test_web_client_matches_server ${slide}: ${verdict} (${views} views, ${mismatches} differ, ` +
 			`${rounded} within rounding, HTJ2K frames ${(rawBytes / htj2kBytes).toFixed(1)}x smaller and lossless, ` +
-			`${tiles} tiles, ${(bytes / 1048576).toFixed(2)} MiB, ${passes} passes, ${(performance.now() - started).toFixed(0)} ms)`);
+			`${tiles} tiles, ${(bytes / 1048576).toFixed(2)} MiB, ${passes} passes, client ${clientMs.toFixed(0)} ms, ` +
+			`${(performance.now() - started).toFixed(0)} ms)`);
 	}
 	process.exit(failed ? 1 : 0);
 }

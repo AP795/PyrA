@@ -26,6 +26,8 @@ SPDX-License-Identifier: MIT
 		<button id="zoom-out" aria-label="Zoom out" disabled>−</button>
 		<button id="zoom-in" aria-label="Zoom in" disabled>+</button>
 		<span id="zoom-label">—</span>
+		<label class="halo" title="Image rendered around the view on every side, as a percentage of the view width. Panning reuses it; 0 renders only the visible view.">Halo
+			<input id="halo" type="number" min="0" max="50" step="1" value="20" aria-label="View halo, percent of the view width"> %</label>
 		<span class="connection" id="connection">Connecting…</span>
 	</header>
 	<main>
@@ -68,7 +70,7 @@ SPDX-License-Identifier: MIT
 	<dialog id="generate-dialog">
 		<form id="generate-form">
 			<div class="dialog-heading"><h1>Generate synthetic slide</h1><button type="button" id="generate-close" aria-label="Close">×</button></div>
-			<p class="hint">Writes a bright-field IHC z-stack into <span id="generate-folder" class="root-path">/</span> and opens it. Nucleus size, spacing and positivity describe the tumour nuclei. Fractions are percentages.</p>
+			<p class="hint">Writes a bright-field IHC z-stack into <span id="generate-folder" class="root-path">/</span> and opens it. Tile 0 writes an untiled TIFF instead (one plane, LZW or JPEG), which is not opened. Nucleus size, spacing and positivity describe the tumour nuclei. Fractions are percentages.</p>
 			<div class="options generate-output">
 				<label>Format<select id="generate-format"><option value="ptf">PTF</option>
 					<option value="dicom" id="generate-dicom" disabled>DICOM (.dcm)</option></select></label>
@@ -77,7 +79,7 @@ SPDX-License-Identifier: MIT
 			<div class="options generate-options">
 				<label>Width · px<input id="generate-width" type="number" required></label>
 				<label>Height · px<input id="generate-height" type="number" required></label>
-				<label>Tile · px<input id="generate-tile" type="number" required></label>
+				<label title="0 writes an untiled TIFF">Tile · px<input id="generate-tile" type="number" required></label>
 				<label>µm / px<input id="generate-mpp" type="number" step="0.001" required></label>
 				<label>Compression<select id="generate-codec"></select></label>
 				<label>Quality<input id="generate-quality" type="number" min="1" max="100" required></label>

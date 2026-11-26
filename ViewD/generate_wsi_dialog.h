@@ -18,14 +18,20 @@ class QSpinBox;
 namespace pyra::test {
 
 // Parameters of a synthetic z-stack (pyra_make_synthetic) and where to write it.
+// Tile size 0 writes an untiled TIFF: one plane, LZW or JPEG.
 class GenerateWsiDialog : public QDialog {
 public:
 	GenerateWsiDialog ( const QString &directory, QWidget *parent = nullptr );
 	QString path () const;
 	pyra_synthetic_options options () const;
+	bool untiled () const;
 
 private:
+	void tile_changed ( int value );
+	void update_layout ();
+	void update_codecs ();
 	void update_quality ();
+	int last_tile_ = 0;
 	QLineEdit *path_ = nullptr;
 	QSpinBox *width_ = nullptr;
 	QSpinBox *height_ = nullptr;

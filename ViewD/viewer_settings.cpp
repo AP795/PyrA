@@ -9,6 +9,7 @@
 #include <QSettings>
 #include <QStandardPaths>
 
+#include <algorithm>
 #include <utility>
 
 namespace pyra::test {
@@ -19,6 +20,7 @@ constexpr auto kStatusFile = "pyra_gui_test.sts";
 constexpr auto kImagePath = "image-path";
 constexpr auto kLastImage = "last-image";
 constexpr auto kRecording = "recording";
+constexpr auto kViewHalo = "view-halo";
 
 QString resolve_path ( QString value, const QString &base )
 {
@@ -79,6 +81,7 @@ QStringList ViewerSettings::load ()
 	image_directory_ = default_image_directory();
 	last_image_.clear();
 	recording_ = {};
+	view_halo_percent_ = kViewHaloDefaultPercent;
 	if (!QDir().mkpath( directory_ ))
 		errors.append( QStringLiteral( "Unable to create settings directory: %1" ).arg( directory_ ) );
 	{
@@ -102,6 +105,15 @@ QStringList ViewerSettings::load ()
 			errors.append( settings_error( status_path(), status.status() ) );
 		else {
 			last_image_ = resolve_path( value, image_directory_ );
+			if (status.contains( QLatin1String( kViewHalo ) )) {
+				auto valid = false;
+				const auto halo = status.value( QLatin1String( kViewHalo ) ).toInt( &valid );
+				if (valid && halo >= 0 && halo <= kViewHaloMaxPercent)
+					view_halo_percent_ = halo;
+				else
+					errors.append( QStringLiteral( "%1: %2 must be 0..%3; using %4" ).arg( status_path(),
+						QLatin1String( kViewHalo ) ).arg( kViewHaloMaxPercent ).arg( kViewHaloDefaultPercent ) );
+			}
 			if (status.contains( QLatin1String( kRecording ) )) {
 				auto error = QString{};
 				if (!decode_recording( status.value( QLatin1String( kRecording ) ).toByteArray(), &recording_, &error ))
@@ -130,6 +142,12 @@ void ViewerSettings::image_loaded ( const QString &path )
 }
 
 
+void ViewerSettings::set_view_halo_percent ( int percent )
+{
+	view_halo_percent_ = std::clamp( percent, 0, kViewHaloMaxPercent );
+}
+
+
 void ViewerSettings::session_saved ( ViewerRecording recording )
 {
 // An unsuccessful startup leaves the previous on-disk session available.
@@ -150,6 +168,7 @@ bool ViewerSettings::save_status ( QString *error ) const
 	auto status = QSettings( status_path(), QSettings::IniFormat );
 	status.setAtomicSyncRequired( true );
 	status.setValue( QLatin1String( kLastImage ), last_image_ );
+	status.setValue( QLatin1String( kViewHalo ), view_halo_percent_ );
 	if (recording_.requests.empty())
 		status.remove( QLatin1String( kRecording ) );
 	else

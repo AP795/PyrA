@@ -221,8 +221,8 @@ a real slide. Start from `pyra_synthetic_options_init` (4096 × 4096 pixels,
 | Field | Meaning | Limits |
 |---|---|---|
 | `width`, `height` | base level, pixels | 1 .. `PYRA_SYNTHETIC_EDGE_MAX` |
-| `tile_edge` | square tile edge, pixels | `PYRA_SYNTHETIC_TILE_MIN` .. `_MAX`, multiple of `_STEP` |
-| `z_levels` | focal planes, from z = 0 | 1 .. `PYRA_SYNTHETIC_Z_MAX` |
+| `tile_edge` | square tile edge, pixels; 0 = untiled TIFF | 0, or `PYRA_SYNTHETIC_TILE_MIN` .. `_MAX`, multiple of `_STEP` |
+| `z_levels` | focal planes, from z = 0 | 1 .. `PYRA_SYNTHETIC_Z_MAX`; 1 when untiled |
 | `z_step_um` | distance between focal planes, µm | `PYRA_SYNTHETIC_Z_STEP_MIN_UM` .. `_MAX_UM` |
 | `focus_fraction` | in-focus depth: 0 = first plane, 1 = last | 0 .. 1 |
 | `mpp` | microns per base pixel | `PYRA_SYNTHETIC_MPP_MIN` .. `_MAX` |
@@ -231,8 +231,8 @@ a real slide. Start from `pyra_synthetic_options_init` (4096 × 4096 pixels,
 | `positive_fraction` | expected share of DAB-positive tumour nuclei | 0 .. 1 |
 | `tumour_fraction` | expected share of the tissue area in tumour nests | 0 .. 1 |
 | `lymphocyte_fraction` | share of stromal nuclei that are lymphocytes | 0 .. 1 |
-| `codec` | `PYRA_CODEC_JPEG`, `_JPEG2000`, `_HTJ2K`, `_JPEGXL` | `pyra_codec_can_encode` |
-| `quality` | 1..100 lossy, `PYRA_QUALITY_LOSSLESS` (not JPEG) | |
+| `codec` | tiled: `PYRA_CODEC_JPEG`, `_JPEG2000`, `_HTJ2K`, `_JPEGXL`, `_JPEGXR`; untiled: `_LZW`, `_JPEG` | `pyra_synthetic_can_encode` |
+| `quality` | 1..100 lossy, `PYRA_QUALITY_LOSSLESS` (not JPEG); ignored by LZW | |
 | `seed` | same options and seed give the same pixels | |
 | `progress`, `progress_user` | called after each tile; return 0 to cancel | |
 
@@ -262,6 +262,17 @@ cancelled write returns `PYRA_INCOMPLETE`. Neither leaves a file. An existing
 file is replaced. The `pyra_make_synthetic` tool and both test viewers'
 **Generate** dialogs use this function for PTF.
 
+With `tile_edge` 0 the same function writes a plain untiled TIFF instead, for
+tools that read ordinary microscope images: the base level of one focal plane
+(`z_levels` must be 1) as a single-page RGB8 TIFF of 64-row strips, compressed
+with LZW (horizontal predictor, lossless) or JPEG (YCbCr 4:2:0), with
+resolution tags in centimetres. Its edges are capped at
+`PYRA_SYNTHETIC_UNTILED_EDGE_MAX` (16384) because readers decode such an image
+as one raster. Name it `.tif`. PyrA opens it through a gallery
+(`pyra_make_gallery` on its directory). `pyra_synthetic_can_encode( codec,
+tile_edge )` tells which codecs go with which layout in this build: LZW only
+untiled, JPEG XR and the JPEG 2000 family only tiled.
+
 `pyra_make_synthetic_dicom( options, path, error )` writes the same synthetic
 tissue as a DICOM Whole Slide Microscopy pyramid. The path names the `.dcm`
 entry file, and lower resolutions go in the sibling `_<stem>_` directory.
@@ -269,7 +280,8 @@ Each instance holds all requested focal planes at their specified depths.
 `pyra_synthetic_dicom_can_encode( codec )` reports whether the build has
 DCMTK and the selected encoder. DICOM generation supports baseline JPEG,
 JPEG 2000 and HTJ2K. The progress callback can also run between tiles while
-writing metadata or publishing. Existing output is refused.
+writing metadata or publishing. Existing output is refused, and so is
+`tile_edge` 0.
 
 `pyra_synthetic_count_nuclei( options, x, y, width, height, nuclei, error )`
 is the slide's ground truth. It counts the nuclei whose centre lies in a base

@@ -18,7 +18,7 @@ CLAUDE.md
 /bld/
 /out/
 plans/
-test_out/
+tst_out/
 CMakeUserPresets.json
 *.ps1
 !/Deps/build_windows.ps1
@@ -34,7 +34,6 @@ CMakeUserPresets.json
 __pycache__/
 
 # Credentials and local slide fixtures.
-/tst_in/
 /tst_out/
 .env
 .env.*
@@ -52,4 +51,3 @@ __pycache__/
 *.imd
 *.icr
 *.ith
-

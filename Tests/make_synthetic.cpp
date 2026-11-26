@@ -2,12 +2,13 @@
 // Copyright (c) 2026 Alexandre Papine
 // SPDX-License-Identifier: MIT
 
-// pyra_make_synthetic <out.ptf> [--size WxH] [--tile N] [--z N] [--mpp X]
-//     [--codec jpeg|jp2k|htj2k|jxl] [--quality 1..100|lossless] [--seed N]
+// pyra_make_synthetic <out.ptf|out.tif> [--size WxH] [--tile N] [--z N] [--mpp X]
+//     [--codec jpeg|jp2k|htj2k|jxl|jxr|lzw] [--quality 1..100|lossless] [--seed N]
 //     [--z-step UM] [--focus 0..1] [--nucleus UM] [--spacing UM]
 //     [--positive 0..1] [--tumour 0..1] [--lymphocytes 0..1]
 //
 // Writes a synthetic bright-field IHC z-stack through pyra_make_synthetic.
+// --tile 0 writes an untiled TIFF instead (one plane: --z 1; LZW or JPEG).
 // Exit code 0 on success; the reason on stderr otherwise.
 
 #include <pyra/pyra.h>
@@ -23,10 +24,11 @@ namespace {
 
 void usage ()
 {
-	std::cerr << "usage: pyra_make_synthetic <out.ptf> [--size WxH] [--tile N] [--z N] [--mpp X]\n"
-		"       [--codec jpeg|jp2k|htj2k|jxl] [--quality 1..100|lossless] [--seed N]\n"
+	std::cerr << "usage: pyra_make_synthetic <out.ptf|out.tif> [--size WxH] [--tile N] [--z N] [--mpp X]\n"
+		"       [--codec jpeg|jp2k|htj2k|jxl|jxr|lzw] [--quality 1..100|lossless] [--seed N]\n"
 		"       [--z-step UM] [--focus 0..1] [--nucleus UM] [--spacing UM]\n"
-		"       [--positive 0..1] [--tumour 0..1] [--lymphocytes 0..1]\n";
+		"       [--positive 0..1] [--tumour 0..1] [--lymphocytes 0..1]\n"
+		"       --tile 0 writes an untiled TIFF: one plane (--z 1), LZW or JPEG\n";
 }
 
 
@@ -57,6 +59,8 @@ bool parse_codec ( const std::string &name, pyra_codec *codec )
 	else if (name == "jp2k" || name == "jpeg2000") *codec = PYRA_CODEC_JPEG2000;
 	else if (name == "htj2k") *codec = PYRA_CODEC_HTJ2K;
 	else if (name == "jxl" || name == "jpegxl") *codec = PYRA_CODEC_JPEGXL;
+	else if (name == "jxr" || name == "jpegxr") *codec = PYRA_CODEC_JPEGXR;
+	else if (name == "lzw") *codec = PYRA_CODEC_LZW;
 	else return false;
 	return true;
 }

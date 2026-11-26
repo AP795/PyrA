@@ -238,6 +238,44 @@ void test_open_dialog_cache_selection ()
 }
 
 
+// Tile 0 is an untiled TIFF: one plane, LZW or JPEG, a .tif; stepping between
+// 0 and the minimum tile skips the edges in between.
+void test_generate_dialog_untiled ()
+{
+	auto dialog = pyra::test::GenerateWsiDialog( QStringLiteral( "out" ) );
+	auto *codec = dialog.findChild<QComboBox *>( QStringLiteral( "synthCodec" ) );
+	auto *lossless = dialog.findChild<QCheckBox *>( QStringLiteral( "synthLossless" ) );
+	auto *quality = dialog.findChild<QSpinBox *>( QStringLiteral( "synthQuality" ) );
+	auto *tile = dialog.findChild<QSpinBox *>( QStringLiteral( "synthTile" ) );
+	auto *z = dialog.findChild<QSpinBox *>( QStringLiteral( "synthZ" ) );
+	auto *width = dialog.findChild<QSpinBox *>( QStringLiteral( "synthWidth" ) );
+	require( codec && lossless && quality && tile && z && width, "Generate dialog controls are missing" );
+	require( codec->findData( uint32_t( PYRA_CODEC_LZW ) ) < 0, "LZW was offered for a tiled slide" );
+	tile->setValue( int( PYRA_SYNTHETIC_TILE_MIN ) );
+	tile->stepBy( -1 );
+	require( tile->value() == 0 && dialog.untiled(), "Stepping below the minimum tile did not reach untiled" );
+	require( z->value() == 1 && !z->isEnabled() && width->maximum() == int( PYRA_SYNTHETIC_UNTILED_EDGE_MAX ) &&
+		dialog.path().endsWith( QStringLiteral( "synthetic_cells.tif" ) ), "Untiled layout not applied" );
+	for (auto i = 0; i < codec->count(); ++i) {
+		require( pyra_synthetic_can_encode( codec->itemData( i ).toUInt(), 0 ),
+			"Generate dialog listed a codec unavailable untiled" );
+	}
+	const auto lzw = codec->findData( uint32_t( PYRA_CODEC_LZW ) );
+	require( lzw >= 0 && codec->findData( uint32_t( PYRA_CODEC_JPEG ) ) >= 0, "Untiled codecs are not LZW and JPEG" );
+	codec->setCurrentIndex( lzw );
+	require( lossless->isChecked() && !lossless->isEnabled() && !quality->isEnabled(),
+		"LZW left a quality choice open" );
+	const auto options = dialog.options();
+	require( options.tile_edge == 0 && options.z_levels == 1 && options.codec == PYRA_CODEC_LZW,
+		"Untiled choices did not reach the options" );
+	tile->stepBy( 1 );
+	require( tile->value() == int( PYRA_SYNTHETIC_TILE_MIN ) && z->isEnabled() &&
+		dialog.path().endsWith( QStringLiteral( "synthetic_cells.ptf" ) ) &&
+		codec->findData( uint32_t( PYRA_CODEC_LZW ) ) < 0 &&
+		codec->currentData().toUInt() == PYRA_CODEC_JPEG, "Returning to tiles did not restore the PTF layout" );
+}
+
+
 void test_generate_dialog_options_and_lossless ()
 {
 	auto dialog = pyra::test::GenerateWsiDialog( QStringLiteral( "out" ) );
@@ -256,8 +294,9 @@ void test_generate_dialog_options_and_lossless ()
 		dialog.path().endsWith( QStringLiteral( "synthetic_cells.ptf" ) ),
 		"Generate dialog does not start from the library defaults" );
 	require( !lossless->isEnabled(), "JPEG offered lossless compression" );
-	require( tile->singleStep() == int( PYRA_SYNTHETIC_TILE_STEP ) && tile->minimum() == int( PYRA_SYNTHETIC_TILE_MIN ) &&
-		z->maximum() == int( PYRA_SYNTHETIC_Z_MAX ), "Generate dialog limits differ from the library" );
+	require( tile->singleStep() == int( PYRA_SYNTHETIC_TILE_STEP ) && tile->minimum() == 0 &&
+		tile->maximum() == int( PYRA_SYNTHETIC_TILE_MAX ) && z->maximum() == int( PYRA_SYNTHETIC_Z_MAX ),
+		"Generate dialog limits differ from the library" );
 	auto *nucleus = dialog.findChild<QDoubleSpinBox *>( QStringLiteral( "synthNucleus" ) );
 	auto *spacing = dialog.findChild<QDoubleSpinBox *>( QStringLiteral( "synthSpacing" ) );
 	auto *positive = dialog.findChild<QDoubleSpinBox *>( QStringLiteral( "synthPositive" ) );
@@ -283,8 +322,10 @@ void test_generate_dialog_options_and_lossless ()
 	focus->setValue( 100.0 );
 	require( near( dialog.options().positive_fraction, 0.75 ) && near( dialog.options().focus_fraction, 1.0 ),
 		"Percent fields did not reach the options as fractions" );
-	for (auto i = 0; i < codec->count(); ++i)
-		require( pyra_codec_can_encode( codec->itemData( i ).toUInt() ), "Generate dialog listed an unavailable codec" );
+	for (auto i = 0; i < codec->count(); ++i) {
+		require( pyra_synthetic_can_encode( codec->itemData( i ).toUInt(), PYRA_SYNTHETIC_TILE_MIN ),
+			"Generate dialog listed a codec unavailable for tiles" );
+	}
 	const auto lossless_codec = codec->findData( uint32_t( PYRA_CODEC_JPEGXL ) ) >= 0
 		? codec->findData( uint32_t( PYRA_CODEC_JPEGXL ) ) : codec->findData( uint32_t( PYRA_CODEC_JPEG2000 ) );
 	if (lossless_codec >= 0) {
@@ -473,6 +514,7 @@ int main ( int argc, char **argv )
 		test_cache_usage_empty_disabled_and_unavailable();
 		test_open_dialog_cache_selection();
 		test_generate_dialog_options_and_lossless();
+		test_generate_dialog_untiled();
 		test_viewer_z_slider_selects_available_positions( QDir( QString::fromLocal8Bit( argv[1] ) ) );
 		test_viewer_zyp_stack_shows_slider( QDir( QString::fromLocal8Bit( argv[1] ) ) );
 		test_viewer_recording_survives_restart( QDir( QString::fromLocal8Bit( argv[1] ) ) );

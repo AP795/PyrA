@@ -3,10 +3,8 @@
 // SPDX-License-Identifier: MIT
 
 #include "img_czi.h"
+#include "img_jxr.h"
 
-#if USE_JXR
-#include <JXRGlue.h>
-#endif
 #if USE_ZSTD
 #include <zstd.h>
 #endif
@@ -55,33 +53,20 @@ size_t czi_pixel_bytes ( CziPixelType type ) noexcept
 }
 
 
-#if USE_JXR
-
-namespace {
-
-struct JxrFormat {
-	const PKPixelFormatGUID *guid;
-	CziPixelType type;
-	bool rgb_order;			// red first: swapped into CZI's blue-first order
-};
-
-
-// The codestream formats a CZI sub-block of each pixel type is written with.
-const JxrFormat kJxrFormats[] = {
-	{ &GUID_PKPixelFormat8bppGray, CziPixelType::Gray8, false },
-	{ &GUID_PKPixelFormat16bppGray, CziPixelType::Gray16, false },
-	{ &GUID_PKPixelFormat32bppGrayFloat, CziPixelType::Gray32Float, false },
-	{ &GUID_PKPixelFormat24bppBGR, CziPixelType::Bgr24, false },
-	{ &GUID_PKPixelFormat24bppRGB, CziPixelType::Bgr24, true },
-	{ &GUID_PKPixelFormat48bppRGB, CziPixelType::Bgr48, true },
-};
-
-
-struct DecoderRelease {
-	void operator() ( PKImageDecode *decoder ) const { decoder->Release( &decoder ); }
-};
-
-} // namespace
+// The JPEG XR layout a CZI sub-block of `type` may be coded in, and whether its
+// samples come red first and must be swapped into CZI's blue-first order.
+static bool czi_layout_matches ( CziPixelType type, JxrLayout layout, bool *rgb_order )
+{
+	*rgb_order = layout == JxrLayout::Rgb24 || layout == JxrLayout::Rgb48;
+	switch (type) {
+		case CziPixelType::Gray8: return layout == JxrLayout::Gray8;
+		case CziPixelType::Gray16: return layout == JxrLayout::Gray16;
+		case CziPixelType::Gray32Float: return layout == JxrLayout::Gray32Float;
+		case CziPixelType::Bgr24: return layout == JxrLayout::Bgr24 || layout == JxrLayout::Rgb24;
+		case CziPixelType::Bgr48: return layout == JxrLayout::Rgb48;
+	}
+	return false;
+}
 
 
 bool czi_decode_jpeg_xr ( const uint8_t *data, size_t size, CziPixelType type,
@@ -90,40 +75,16 @@ bool czi_decode_jpeg_xr ( const uint8_t *data, size_t size, CziPixelType type,
 	const auto bytes = packed_bytes( type, width, height );
 	if (!data || size == 0 || !pixels || bytes == 0)
 		return fail( error, "invalid JPEG XR sub-block request" );
-	struct tagWMPStream *stream = nullptr;
-	if (CreateWS_Memory( &stream, const_cast<uint8_t *>( data ), size ) < 0 || !stream)
-		return fail( error, "cannot wrap the JPEG XR payload in a stream" );
-	PKImageDecode *raw = nullptr;
-	if (PKImageDecode_Create_WMP( &raw ) < 0 || !raw) {
-		stream->Close( &stream );
-		return fail( error, "cannot create a JPEG XR decoder" );
-	}
-	auto decoder = std::unique_ptr<PKImageDecode, DecoderRelease>( raw );
-	if (decoder->Initialize( decoder.get(), stream ) < 0) {
-		stream->Close( &stream );
-		return fail( error, "JPEG XR header is invalid" );
-	}
-// From here the decoder closes the stream when it is released.
-	decoder->fStreamOwner = !0;
-	auto format = PKPixelFormatGUID{};
-	auto w = I32{ 0 };
-	auto h = I32{ 0 };
-	if (decoder->GetPixelFormat( decoder.get(), &format ) < 0 || decoder->GetSize( decoder.get(), &w, &h ) < 0)
-		return fail( error, "JPEG XR image information is unavailable" );
-	if (w != width || h != height)
+	auto packed = JxrPacked{};
+	if (!jxr_decode_packed( data, size, &packed, error ))
+		return false;
+	if (packed.width != width || packed.height != height)
 		return fail( error, "JPEG XR image size differs from the sub-block" );
-	const auto *match = std::find_if( std::begin( kJxrFormats ), std::end( kJxrFormats ),
-		[&] ( const JxrFormat &candidate ) {
-			return candidate.type == type && IsEqualGUID( candidate.guid, &format );
-		} );
-	if (match == std::end( kJxrFormats ))
+	auto rgb_order = false;
+	if (!czi_layout_matches( type, packed.layout, &rgb_order ) || packed.pixels.size() != bytes)
 		return fail( error, "JPEG XR pixel format does not match the sub-block pixel type" );
-	const auto stride = (size_t)width * czi_pixel_bytes( type );
-	pixels->assign( bytes, 0 );
-	const auto rect = PKRect{ 0, 0, width, height };
-	if (decoder->Copy( decoder.get(), &rect, pixels->data(), (U32)stride ) < 0)
-		return fail( error, "JPEG XR decoding failed" );
-	if (match->rgb_order) {
+	*pixels = std::move( packed.pixels );
+	if (rgb_order) {
 		const auto sample = czi_pixel_bytes( type ) / 3;
 		for (size_t offset = 0; offset < bytes; offset += 3 * sample)
 			std::swap_ranges( pixels->data() + offset, pixels->data() + offset + sample,
@@ -131,16 +92,6 @@ bool czi_decode_jpeg_xr ( const uint8_t *data, size_t size, CziPixelType type,
 	}
 	return true;
 }
-
-#else
-
-bool czi_decode_jpeg_xr ( const uint8_t *, size_t, CziPixelType, int, int,
-	std::vector<uint8_t> *, std::string *error )
-{
-	return fail( error, "JPEG XR decoding requires PYR_WITH_JXR" );
-}
-
-#endif
 
 
 #if USE_ZSTD

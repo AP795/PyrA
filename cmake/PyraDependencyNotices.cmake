@@ -13,6 +13,12 @@ function(pyra_install_dependency_notices destination)
 	set(cpp-httplib httplib/LICENSE)
 	set(jxrlib jxrlib/LICENSE)
 	set(zstd zstd/LICENSE)
+# libjxl and the copies of its dependencies it bundles (one folder each: all
+# four name their license file LICENSE).
+	set(libjxl libjxl/LICENSE libjxl/PATENTS libjxl/SOURCE-NOTICES.txt)
+	set(highway libjxl/third_party/highway/LICENSE libjxl/third_party/highway/LICENSE-BSD3)
+	set(brotli libjxl/third_party/brotli/LICENSE)
+	set(skcms libjxl/third_party/skcms/LICENSE)
 	foreach(dependency IN LISTS ARGN)
 		set(notices ${${dependency}})
 		if(NOT notices)

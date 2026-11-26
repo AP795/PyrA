@@ -7,18 +7,22 @@
 // The synthetic z-stack writer through the public C interface: option
 // validation, the plane and level ladder it writes, the focus profile across the
 // stack and where it peaks, every compression this build can encode,
-// cancellation, and the nucleus census against the requested size, spacing and
+// cancellation, the untiled TIFF (tile 0, LZW or JPEG) read back through a
+// gallery, and the nucleus census against the requested size, spacing and
 // fractions.
 
 #include <pyra/pyra.h>
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -104,13 +108,18 @@ struct Slide {
 
 	// The whole base level of one plane, RGB8.
 	std::vector<uint8_t> base ( uint32_t plane ) const {
+		return region( plane, 0, 0, kEdge, kEdge );
+	}
+
+	// A base-pixel rectangle of one plane, RGB8.
+	std::vector<uint8_t> region ( uint32_t plane, uint32_t x, uint32_t y, uint32_t width, uint32_t height ) const {
 		const auto request = pyra_image_request{ sizeof( pyra_image_request ), plane,
-			{ 0, 0, kEdge * kMpp, kEdge * kMpp }, kMpp };
+			{ x * kMpp, y * kMpp, width * kMpp, height * kMpp }, kMpp };
 		auto layout = pyra_image_layout{};
 		layout.struct_size = sizeof( layout );
 		auto error = pyra_error{};
 		require( pyra_get_image_layout( wsi_, &request, &layout, &error ) == PYRA_OK, error.message );
-		require( layout.width == kEdge && layout.height == kEdge && layout.pixel_format == PYRA_PIXEL_RGB8,
+		require( layout.width == width && layout.height == height && layout.pixel_format == PYRA_PIXEL_RGB8,
 			"Base layout differs" );
 		auto pixels = std::vector<uint8_t>( layout.capacity_bytes );
 		auto buffer = pyra_image_buffer{ sizeof( pyra_image_buffer ), layout.pixel_format,
@@ -377,7 +386,7 @@ void test_synthetic_codecs ( const std::filesystem::path &directory )
 {
 	struct Codec { pyra_codec value; const char *name; };
 	const Codec codecs[] = { { PYRA_CODEC_JPEG, "jpeg" }, { PYRA_CODEC_JPEG2000, "jp2k" },
-		{ PYRA_CODEC_HTJ2K, "htj2k" }, { PYRA_CODEC_JPEGXL, "jxl" } };
+		{ PYRA_CODEC_HTJ2K, "htj2k" }, { PYRA_CODEC_JPEGXL, "jxl" }, { PYRA_CODEC_JPEGXR, "jxr" } };
 	auto reference = std::vector<uint8_t>{};
 	for (const auto &codec : codecs) {
 		auto options = small_options();
@@ -402,6 +411,143 @@ void test_synthetic_codecs ( const std::filesystem::path &directory )
 			reference = pixels;
 		require( pixels == reference, std::format( "Lossless {} pixels differ from another lossless codec", codec.name ) );
 	}
+}
+
+
+// The single member of the gallery made from `directory`: its mosaic rectangle,
+// read from the manifest line member=<x> <y> <w> <h> ...
+std::array<uint32_t, 4> gallery_member_rect ( const std::filesystem::path &manifest )
+{
+	auto file = std::ifstream( manifest );
+	auto line = std::string{};
+	while (std::getline( file, line )) {
+		if (line.rfind( "member=", 0 ) != 0)
+			continue;
+		auto fields = std::istringstream( line.substr( 7 ) );
+		auto rect = std::array<uint32_t, 4>{};
+		for (auto &value : rect)
+			fields >> value;
+		require( bool( fields ), "Unreadable gallery member line" );
+		return rect;
+	}
+	throw std::runtime_error( "The gallery names no member" );
+}
+
+
+// An untiled TIFF written alone into its own directory, made into a gallery.
+std::filesystem::path untiled_gallery ( const std::filesystem::path &directory, const char *name,
+	pyra_codec codec, std::array<uint32_t, 4> *member )
+{
+	const auto folder = directory / name;
+	std::filesystem::remove_all( folder );
+	std::filesystem::create_directories( folder );
+	auto options = small_options();
+	options.tile_edge = 0;
+	options.z_levels = 1;
+	options.codec = codec;
+	make( options, folder / ( std::string( name ) + ".tif" ) );
+	auto manifest = std::array<char, 1024>{};
+	auto error = pyra_error{};
+	require( pyra_make_gallery( utf8( folder ).c_str(), 0.0, manifest.data(), manifest.size(), &error ) == PYRA_OK,
+		error.message );
+	*member = gallery_member_rect( manifest.data() );
+	require( ( *member )[2] == kEdge && ( *member )[3] == kEdge,
+		std::format( "Untiled member is {}x{}, not {}x{}", ( *member )[2], ( *member )[3], kEdge, kEdge ) );
+	return manifest.data();
+}
+
+
+void test_synthetic_untiled_lzw_round_trip ( const std::filesystem::path &directory )
+{
+	auto member = std::array<uint32_t, 4>{};
+	const auto manifest = untiled_gallery( directory, "synthetic_untiled_lzw", PYRA_CODEC_LZW, &member );
+	const auto pixels = Slide( manifest ).region( 0, member[0], member[1], member[2], member[3] );
+	for (const auto codec : { PYRA_CODEC_JPEGXL, PYRA_CODEC_JPEG2000, PYRA_CODEC_HTJ2K, PYRA_CODEC_JPEGXR }) {
+		if (!pyra_codec_can_encode( codec ))
+			continue;
+		auto options = small_options();
+		options.z_levels = 1;
+		options.codec = codec;
+		options.quality = PYRA_QUALITY_LOSSLESS;
+		const auto reference = directory / "synthetic_untiled_reference.ptf";
+		make( options, reference );
+		require( pixels == Slide( reference ).base( 0 ), "LZW pixels differ from the lossless tiled slide" );
+		return;
+	}
+	throw std::runtime_error( "No lossless tiled codec to compare LZW against" );
+}
+
+
+void test_synthetic_untiled_jpeg ( const std::filesystem::path &directory )
+{
+	auto member = std::array<uint32_t, 4>{};
+	const auto manifest = untiled_gallery( directory, "synthetic_untiled_jpeg", PYRA_CODEC_JPEG, &member );
+	const auto pixels = Slide( manifest ).region( 0, member[0], member[1], member[2], member[3] );
+	auto tiled = small_options();
+	tiled.z_levels = 1;
+	const auto reference = directory / "synthetic_untiled_jpeg_reference.ptf";
+	make( tiled, reference );
+	const auto expected = Slide( reference ).base( 0 );
+	auto error = 0.0;
+	for (auto i = size_t{ 0 }; i < pixels.size(); ++i)
+		error += std::abs( int( pixels[i] ) - int( expected[i] ) );
+	error /= double( pixels.size() );
+	require( error < 6.0, std::format( "Untiled JPEG differs from the tiled JPEG by {:.2f} grey levels", error ) );
+}
+
+
+void test_synthetic_untiled_invalid ( const std::filesystem::path &directory )
+{
+	const auto path = directory / "synthetic_untiled_invalid.tif";
+	std::filesystem::remove( path );
+	auto check = [&] ( pyra_synthetic_options options, pyra_status expected, const char *what, bool dicom = false ) {
+		auto error = pyra_error{};
+		const auto write = dicom ? pyra_make_synthetic_dicom : pyra_make_synthetic;
+		const auto target = dicom ? directory / "synthetic_untiled_invalid.dcm" : path;
+		require( write( &options, utf8( target ).c_str(), &error ) == expected,
+			std::format( "{} was not refused as expected ({})", what, error.message ) );
+		require( error.message[0] != '\0', std::format( "{} gave no reason", what ) );
+		require( !std::filesystem::exists( target ), std::format( "{} left a file", what ) );
+	};
+	auto untiled = small_options();
+	untiled.tile_edge = 0;
+	untiled.z_levels = 1;
+	untiled.codec = PYRA_CODEC_LZW;
+	auto options = untiled;
+	options.z_levels = 2;
+	check( options, PYRA_INVALID_ARGUMENT, "An untiled z-stack" );
+	options = small_options();
+	options.codec = PYRA_CODEC_LZW;
+	check( options, PYRA_INVALID_ARGUMENT, "Tiled LZW" );
+	options = untiled;
+	options.codec = PYRA_CODEC_JPEG2000;
+	check( options, PYRA_INVALID_ARGUMENT, "Untiled JPEG 2000" );
+	options = untiled;
+	options.width = PYRA_SYNTHETIC_UNTILED_EDGE_MAX + 1;
+	check( options, PYRA_INVALID_ARGUMENT, "An oversized untiled image" );
+	options = untiled;
+	options.tile_edge = 16;
+	check( options, PYRA_INVALID_ARGUMENT, "Tile edge 16" );
+	options = untiled;
+	options.codec = PYRA_CODEC_JPEG;
+	check( options, pyra_synthetic_dicom_can_encode( PYRA_CODEC_JPEG ) ? PYRA_INVALID_ARGUMENT : PYRA_UNSUPPORTED,
+		"An untiled DICOM", true );
+}
+
+
+void test_synthetic_can_encode_layouts ()
+{
+	struct Case { pyra_codec codec; bool tiled; bool untiled; };
+	const Case cases[] = { { PYRA_CODEC_JPEG, true, true }, { PYRA_CODEC_LZW, false, true },
+		{ PYRA_CODEC_JPEG2000, true, false }, { PYRA_CODEC_HTJ2K, true, false },
+		{ PYRA_CODEC_JPEGXL, true, false }, { PYRA_CODEC_JPEGXR, true, false }, { 99, false, false } };
+	for (const auto &item : cases) {
+		const auto built = item.codec == PYRA_CODEC_LZW || pyra_codec_can_encode( item.codec ) != 0;
+		require( ( pyra_synthetic_can_encode( item.codec, PYRA_SYNTHETIC_TILE_MIN ) != 0 ) == ( item.tiled && built ) &&
+			( pyra_synthetic_can_encode( item.codec, 0 ) != 0 ) == ( item.untiled && built ),
+			std::format( "Codec {} offered for the wrong layouts", item.codec ) );
+	}
+	require( pyra_codec_can_encode( PYRA_CODEC_LZW ) == 1, "LZW is not reported encodable" );
 }
 
 
@@ -448,6 +594,10 @@ int main ( int argc, char **argv )
 		run( "test_synthetic_census_lymphocyte_fraction", test_synthetic_census_lymphocyte_fraction );
 		run( "test_synthetic_codecs", [&] { test_synthetic_codecs( directory ); } );
 		run( "test_synthetic_cancel", [&] { test_synthetic_cancel( directory ); } );
+		run( "test_synthetic_untiled_lzw_round_trip", [&] { test_synthetic_untiled_lzw_round_trip( directory ); } );
+		run( "test_synthetic_untiled_jpeg", [&] { test_synthetic_untiled_jpeg( directory ); } );
+		run( "test_synthetic_untiled_invalid", [&] { test_synthetic_untiled_invalid( directory ); } );
+		run( "test_synthetic_can_encode_layouts", test_synthetic_can_encode_layouts );
 		return 0;
 	} catch (const std::exception &error) {
 		std::cerr << "FAIL: " << error.what() << '\n';

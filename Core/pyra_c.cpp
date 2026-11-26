@@ -394,6 +394,8 @@ static_assert( priml::kSynthTileEdgeMin == PYRA_SYNTHETIC_TILE_MIN &&
 	priml::kSynthTileEdgeMax == PYRA_SYNTHETIC_TILE_MAX &&
 	priml::kSynthTileEdgeStep == PYRA_SYNTHETIC_TILE_STEP &&
 	priml::kSynthImageEdgeMax == PYRA_SYNTHETIC_EDGE_MAX &&
+	priml::kSynthUntiledEdgeMax == PYRA_SYNTHETIC_UNTILED_EDGE_MAX &&
+	priml::kSynthUntiledTileEdge == 0 &&
 	priml::kSynthZLevelsMax == PYRA_SYNTHETIC_Z_MAX &&
 	priml::kSynthMppMin == PYRA_SYNTHETIC_MPP_MIN &&
 	priml::kSynthMppMax == PYRA_SYNTHETIC_MPP_MAX &&
@@ -414,6 +416,8 @@ priml::ImgCodec codec_from_c ( pyra_codec codec ) noexcept
 	case PYRA_CODEC_JPEG2000: return priml::ImgCodec::Jp2k;
 	case PYRA_CODEC_HTJ2K: return priml::ImgCodec::Htj2k;
 	case PYRA_CODEC_JPEGXL: return priml::ImgCodec::Jxl;
+	case PYRA_CODEC_JPEGXR: return priml::ImgCodec::JpegXr;
+	case PYRA_CODEC_LZW: return priml::ImgCodec::Lzw;
 	default: return priml::ImgCodec::None;
 	}
 }
@@ -450,7 +454,15 @@ priml::SyntheticSlideSpec spec_from_c ( const pyra_synthetic_options &options )
 
 int pyra_codec_can_encode ( pyra_codec codec )
 {
-	return priml::img_codec_can_encode( codec_from_c( codec ) ) ? 1 : 0;
+	const auto value = codec_from_c( codec );
+	return value == priml::ImgCodec::Lzw || priml::img_codec_can_encode( value ) ? 1 : 0;
+}
+
+
+int pyra_synthetic_can_encode ( pyra_codec codec, uint32_t tile_edge )
+{
+	const auto untiled = tile_edge == uint32_t( priml::kSynthUntiledTileEdge );
+	return priml::synthetic_can_encode( codec_from_c( codec ), untiled ) ? 1 : 0;
 }
 
 
@@ -490,10 +502,13 @@ static pyra_status make_synthetic ( const pyra_synthetic_options *options,
 		if (dicom)
 			require( priml::synthetic_dicom_can_encode( spec.codec ),
 				"DICOM generation needs DCMTK and an enabled JPEG, JPEG 2000 or HTJ2K encoder", PYRA_UNSUPPORTED );
+		if (dicom)
+			require( !priml::synthetic_untiled( spec ), "A DICOM WSI needs a tile size; tile 0 (untiled) is TIFF only" );
 		auto reason = std::string{};
 		if (!priml::synthetic_spec_valid( spec, &reason )) {
-			const auto unavailable = spec.codec != priml::ImgCodec::None &&
-				!priml::img_codec_can_encode( spec.codec );
+			const auto untiled = priml::synthetic_untiled( spec );
+			const auto unavailable = priml::synthetic_codec_allowed( spec.codec, untiled ) &&
+				!priml::synthetic_can_encode( spec.codec, untiled );
 			throw ApiFailure{ unavailable ? PYRA_UNSUPPORTED : PYRA_INVALID_ARGUMENT, reason };
 		}
 		auto progress = priml::SyntheticProgress{};

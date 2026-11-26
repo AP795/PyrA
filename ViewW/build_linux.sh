@@ -22,12 +22,12 @@ if [[ -n "$client_dir" ]]; then
 fi
 
 bash "$source_dir/Deps/build.sh" "$build_dir/deps"
-printf 'PyrA codecs: OpenJPEG=ON OpenJPH=ON DCMTK=ON\n'
+printf 'PyrA codecs: OpenJPEG=ON OpenJPH=ON JXL=ON DCMTK=ON\n'
 
 cmake -S "$source_dir" -B "$build_dir/pyra" -DCMAKE_BUILD_TYPE=Release \
 	-DCMAKE_INSTALL_PREFIX="$build_dir/install" -DCMAKE_INSTALL_LIBDIR=lib \
 	-DPYRA_BUILD_GUI_TEST=OFF -DPYRA_BUILD_WEB_TEST=ON \
-	-DPYR_WITH_OPENJPEG=ON -DPYR_WITH_JXL=OFF -DPYR_WITH_CZI=OFF \
+	-DPYR_WITH_OPENJPEG=ON -DPYR_WITH_JXL=ON -DPYR_WITH_CZI=OFF \
 	-DPYR_WITH_OPENJPH=ON -DPYR_WITH_DCMTK=ON -DPYRA_WITH_OPENSLIDE=OFF \
 	-DPYRA_LINUX_SDK="$build_dir/deps/install" \
 	-DPYRA_WEB_CLIENT_DIR="$client_dir"
@@ -37,4 +37,4 @@ fi
 cmake --build "$build_dir/pyra" --parallel "$jobs"
 ctest --test-dir "$build_dir/pyra" --output-on-failure
 cmake --install "$build_dir/pyra"
-printf '\nRun: %s/bin/pyra_web_test --root /path/to/images\n' "$build_dir/install"
+printf '\nRun: %s/bin/PyrA_Web_Viewer --root /path/to/images\n' "$build_dir/install"

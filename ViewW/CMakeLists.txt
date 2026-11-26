@@ -39,6 +39,10 @@ if(PYRA_WEB_CLIENT_DIR)
 		COMMENT "Embedding the browser client")
 	target_sources(pyra_web_support PRIVATE "${pyra_client_source}")
 	target_compile_definitions(pyra_web_support PRIVATE PYRA_WEB_WITH_CLIENT=1)
+# Notices of what the client bundles beyond this build's own codecs (JPEG XL).
+	if(IS_DIRECTORY "${PYRA_WEB_CLIENT_DIR}/third-party")
+		install(DIRECTORY "${PYRA_WEB_CLIENT_DIR}/third-party/" DESTINATION "${pyra_notice_destination}")
+	endif()
 else()
 	target_compile_definitions(pyra_web_support PRIVATE PYRA_WEB_WITH_CLIENT=0)
 endif()
@@ -47,9 +51,9 @@ target_include_directories(pyra_web_support PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
 	PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(pyra_web_support SYSTEM PRIVATE "${PYRA_HTTPLIB_DIR}")
 target_compile_definitions(pyra_web_support PUBLIC UNICODE _UNICODE NOMINMAX)
-add_executable(pyra_web_test main.cpp)
-target_link_libraries(pyra_web_test PRIVATE pyra_web_support)
-target_compile_definitions(pyra_web_test PRIVATE
+add_executable(PyrA_Web_Viewer main.cpp)
+target_link_libraries(PyrA_Web_Viewer PRIVATE pyra_web_support)
+target_compile_definitions(PyrA_Web_Viewer PRIVATE
 	PYRA_WEB_IMAGE_DIRECTORY="${PYRA_VIEWER_IMAGE_DIRECTORY}"
 	PYRA_WEB_LOG_DIRECTORY="${PROJECT_BINARY_DIR}/logs")
 
@@ -62,19 +66,19 @@ if(TARGET pyra_bridge)
 	target_compile_definitions(pyra_web_support PUBLIC PYRA_WEB_WITH_BRIDGE=1
 		PYRA_WEB_BRIDGE_CLI="$<TARGET_FILE:pyra_process>"
 		PYRA_WEB_BRIDGE_PYTHON="${PROJECT_SOURCE_DIR}/Core/bridge/python")
-	add_dependencies(pyra_web_test pyra_process)
+	add_dependencies(PyrA_Web_Viewer pyra_process)
 else()
 	target_compile_definitions(pyra_web_support PUBLIC PYRA_WEB_WITH_BRIDGE=0)
 endif()
 if(MSVC)
 	target_compile_options(pyra_web_support PRIVATE /W4 /permissive- /utf-8)
-	target_compile_options(pyra_web_test PRIVATE /W4 /permissive- /utf-8)
+	target_compile_options(PyrA_Web_Viewer PRIVATE /W4 /permissive- /utf-8)
 else()
 	target_compile_options(pyra_web_support PRIVATE -Wall -Wextra)
-	target_compile_options(pyra_web_test PRIVATE -Wall -Wextra)
+	target_compile_options(PyrA_Web_Viewer PRIVATE -Wall -Wextra)
 endif()
-set_target_properties(pyra_web_test PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
-install(TARGETS pyra_web_test RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+set_target_properties(PyrA_Web_Viewer PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+install(TARGETS PyrA_Web_Viewer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES "${PYRA_HTTPLIB_DIR}/LICENSE" DESTINATION "${pyra_notice_destination}/cpp-httplib")
 if(BUILD_TESTING)
 	find_program(PYRA_NODE_EXECUTABLE NAMES node)
@@ -95,7 +99,7 @@ endif()
 # Windows has no rpath: put the reader library (and OpenSlide, when built) beside
 # the server and its test, as the Qt viewer targets do.
 if(WIN32)
-	foreach(web_target pyra_web_test pyra_web_server_test)
+	foreach(web_target PyrA_Web_Viewer pyra_web_server_test)
 		if(TARGET ${web_target})
 			add_custom_command(TARGET ${web_target} POST_BUILD
 				COMMAND ${CMAKE_COMMAND} -E copy_if_different

@@ -20,7 +20,11 @@ namespace pyra::test {
 
 inline constexpr auto kMaxRenderEdge = 4096;
 inline constexpr auto kOverviewEdge = 256;
-inline constexpr auto kViewOverscanFactor = 1.5;
+// Halo band rendered around the visible view on every side, as a percentage of
+// the view's raster width, so slow panning moves over pixels already rendered.
+// 0 renders the exact view. The toolbar sets it within 0..kViewHaloMaxPercent.
+inline constexpr auto kViewHaloDefaultPercent = 20;
+inline constexpr auto kViewHaloMaxPercent = 50;
 
 struct CacheUsage {
 	pyra_context_options options = reader_options();
@@ -30,8 +34,13 @@ struct CacheUsage {
 };
 
 // GUI-owned prepared images are bounded by kMaxRenderEdge on both axes.
-RenderRequest prepare_view_request ( const RenderRequest &view );
+// halo_percent is clamped to 0..kViewHaloMaxPercent.
+RenderRequest prepare_view_request ( const RenderRequest &view, int halo_percent );
 bool view_request_is_covered ( const RenderRequest &prepared, const RenderRequest &view );
+// True once the view has used up half of the prepared image's actual halo on
+// any side, so the next image arrives before the halo's edge comes into view.
+// Without a halo this is plain coverage.
+bool view_request_needs_refresh ( const RenderRequest &prepared, const RenderRequest &view );
 
 struct OpenInfo {
 	QString error;

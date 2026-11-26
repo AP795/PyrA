@@ -8,7 +8,9 @@ SPDX-License-Identifier: MIT
 
 This directory contains the dependency sources from the previous Linux bundle:
 libjpeg-turbo 3.1.3, libtiff 4.7.0, OpenJPEG 2.5.0, zlib 1.3.2, OpenJPH 0.33.0,
-DCMTK 3.7.0, and cpp-httplib 0.36.0. The source directories retain their
+DCMTK 3.7.0, and cpp-httplib 0.36.0, plus libjxl 0.11.0 with its Brotli,
+Highway 1.2.0 and skcms copies (`libjxl/`, trimmed to what the libraries need;
+`libjxl/SOURCE-NOTICES.txt` lists the revisions and what was removed). The source directories retain their
 upstream notices. The libtiff, OpenJPEG, and zlib notices are available in
 their respective source directories. LibTIFF, OpenJPEG, and OpenJPH also have
 `SOURCE-NOTICES.txt` with copyright and license text from their source headers.
@@ -55,14 +57,20 @@ limitations of this minimal upload, not missing requirements of the browser view
 `jxrlib/` (jxrlib 1.1, Microsoft, BSD; the portable copy libCZI carries, see
 `jxrlib/LICENSE`) and `zstd/` (zstd 1.5.7 decompressor, BSD) decode JPEG XR and
 zstd CZI sub-blocks (`Core/img_czi.cpp`, `PYR_WITH_JXR` / `PYR_WITH_ZSTD`, on by
-default). PyrA compiles them directly; no SDK step is needed. libCZI itself is
+default); jxrlib's encoder also makes JPEG XR a PTF tile codec (`Core/img_jxr.cpp`). PyrA compiles them directly; no SDK step is needed. libCZI itself is
 used only by the CZI loader, so a build without it, such as the browser client,
 still decodes CZI tiles. `jxrlib/pyra/JxrDecode_Config.h` replaces the
 configure step of libCZI's build with preprocessor tests.
 
 The same adapter also accepts an Emscripten configure (`emcmake cmake -S Deps`),
 which builds the codecs of the web viewer's browser client for wasm32 with
-WebAssembly exception handling. See [the viewer README](../ViewW/README.md#building-the-client).
+WebAssembly exception handling, threads and SIMD (`-msimd128`). See [the viewer README](../ViewW/README.md#building-the-client).
+
+libjxl is built by its own CMake build with the options of
+`libjxl_options.cmake` (static libraries only: no tools, tests, jpegli or
+transcoding; skcms as colour engine), in this adapter for Linux and Emscripten
+(`PYRA_DEPENDENCY_JXL`, ON by default) and by the `JXL` component of
+`build_windows.ps1`. Highway selects the CPU's SIMD at run time natively.
 
 The codec test checks lossless JPEG 8/12/16-bit round trips, TIFF LZW and
 Deflate round trips, an OpenJPEG lossless round trip, and OpenJPH and httplib
@@ -78,7 +86,8 @@ From the PyrA root in PowerShell, run:
 .\Deps\build_windows.ps1
 ```
 
-The script builds Release and Debug SDKs under `out/Deps/windows/`. For the
+The script builds Release and Debug SDKs under `out/Deps/windows/` (components
+`Btf`, `OpenJPH`, `DCMTK` and `JXL`, all by default; `-Components` selects some). For the
 nested WSIA workspace, pass `-BuildRoot ../out/Deps`. The BTF64 archive includes
 the bundled TIFF, JPEG, OpenJPEG and zlib sources with JPEG SIMD enabled.
 It is built with both MSVC runtimes used by the host projects.

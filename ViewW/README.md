@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Localhost test viewer
 
-`pyra_web_test` is an optional Qt-free viewer. A native C++ process opens
+`PyrA_Web_Viewer` is an optional Qt-free viewer. A native C++ process opens
 images through the public PyrA C API and serves embedded HTML/CSS/JavaScript
 over HTTP on `127.0.0.1`. The browser performs only interaction and display;
 the native library performs image reading and region rendering.
@@ -24,14 +24,17 @@ into the folder last shown by **Open image** and then opens it. Choose **PTF**
 or, in a build with DCMTK, **DICOM (.dcm)**. DICOM writes one instance per
 pyramid resolution with all focal planes. Open the named `.dcm` file and
 keep the sibling `_<name>_/` directory with it for lower resolutions.
-DICOM offers baseline JPEG, JPEG 2000 and HTJ2K when built. JPEG XL is
-available for PTF. Its dialog
+DICOM offers baseline JPEG, JPEG 2000 and HTJ2K when built. JPEG XL and
+JPEG XR are available for PTF. Tile 0 writes a plain untiled TIFF instead
+(`.tif`, one plane, LZW or JPEG, at most 16384 pixels per edge); it is not
+opened, and DICOM refuses it. Its dialog
 has the Qt viewer's slide, focus and tissue settings; the request sends
 fractions as 0..1 (`z_step`, `focus`, `nucleus`, `spacing`, `positive`,
 `tumour`, `lymphocytes`, each optional with the library default). Generation
 runs in the background. `POST /api/generate` starts it with `format=ptf`
-(the default) or `format=dicom`. `GET /api/generate`
-reports tile progress, and `POST /api/generate-cancel` stops it. One
+(the default) or `format=dicom`; `/api/config` lists each codec with
+`tiled`/`untiled` flags. `GET /api/generate`
+reports tile (or strip) progress, and `POST /api/generate-cancel` stops it. One
 generation runs at a time, and an existing file name is refused.
 The existing Qt evaluator remains available for recording/replay.
 
@@ -78,7 +81,7 @@ cmake -S . -B out/build/linux-web-system -DCMAKE_BUILD_TYPE=Release \
   -DPYRA_BUILD_GUI_TEST=OFF -DPYRA_BUILD_WEB_TEST=ON
 cmake --build out/build/linux-web-system --parallel 2
 ctest --test-dir out/build/linux-web-system --output-on-failure
-out/build/linux-web-system/ViewW/pyra_web_test --root /data/images
+out/build/linux-web-system/ViewW/PyrA_Web_Viewer --root /data/images
 ```
 
 If the SDKs are not discoverable, provide the TIFF, JPEG and OpenJPEG paths
@@ -89,7 +92,7 @@ To build using the dependency sources in the checkout, run from the PyrA root:
 
 ```sh
 bash ViewW/build_linux.sh
-out/build/linux-web/install/bin/pyra_web_test --root /data/images
+out/build/linux-web/install/bin/PyrA_Web_Viewer --root /data/images
 ```
 
 The helper builds the codecs and a static DCMTK 3.7.0 subset, then enables
@@ -166,8 +169,8 @@ views, and a revisited area costs no transfer.
   resources are same-origin. A page that is not isolated (a proxy dropping the
   headers) or not a secure context (plain http to a remote host) gets no client
   and is rendered by the server.
-- For a plane whose codec the client lacks (JPEG XL), the server renders the
-  view and sends it as a lossless HTJ2K RGB frame (`/api/render?encoding=htj2k`,
+- For a plane whose codec the client lacks (JPEG XL in a client built without
+  it), the server renders the view and sends it as a lossless HTJ2K RGB frame (`/api/render?encoding=htj2k`,
   header `X-Pyra-Encoding`), which the client decodes. Without the client, or
   before it is ready, the view comes from `/api/render` as raw RGBA, as before.
   The minimap overview always does.
@@ -182,11 +185,17 @@ main thread for every tile and had held the speedup to 1.4x. HTJ2K frames are 3.
 server 41-69 ms of encoding each, so on loopback raw frames arrive sooner; the
 compressed frame pays off once the link is slower than about 100 MB/s.
 
-The client decodes everything the server decodes except JPEG XL (not yet built
-for WebAssembly) and DICOM-specific codecs it does not bundle. Checked against
-the server's own `/api/render`: identical for SVS JPEG and JPEG 2000, DICOM,
-NDPI and PTF; lossy HTJ2K differs by one code value in a few samples per
-million, the rounding of OpenJPH's float wavelet in WebAssembly versus x64.
+The client decodes JPEG, JPEG 2000, HTJ2K, JPEG XL, JPEG XR, TIFF's internal
+codecs and CZI sub-blocks (JPEG XR, zstd), i.e. everything the server decodes
+except DICOM-specific codecs it does not bundle. Checked against the server's
+own `/api/render`: identical for SVS JPEG and JPEG 2000, DICOM, NDPI and PTF
+(lossless JPEG XL, JPEG XR, HTJ2K). Lossy HTJ2K differs by one code value in a
+few samples per million and lossy JPEG XL by one code value in about 1% of
+samples: the rounding of float decoders in WebAssembly versus x64 SIMD. On a
+synthetic PTF, the four-view pass that the server fallback answered with
+2.5-2.8 MiB of HTJ2K frames, every time, costs the JPEG XL client 1.7-4.3 MiB of
+stored tiles once and nothing on a repeat; adding JPEG XL grew
+`pyra_client.wasm` from 2.30 to 3.06 MB.
 
 ### Building the client
 
@@ -198,16 +207,36 @@ any host with emsdk works):
 emcmake cmake -G Ninja -S Deps -B ../out/Pyra/build/wasm-deps -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=../out/Pyra/build/wasm-deps/install
 cmake --build ../out/Pyra/build/wasm-deps
 cmake --install ../out/Pyra/build/wasm-deps
-emcmake cmake -G Ninja -S . -B ../out/Pyra/build/wasm -DCMAKE_BUILD_TYPE=Release -DPYRA_LINUX_SDK=../out/Pyra/build/wasm-deps/install -DPYR_WITH_OPENJPH=ON -DPYR_WITH_JXL=OFF -DPYR_WITH_DCMTK=OFF -DPYR_WITH_CZI=OFF -DPYRA_WITH_OPENSLIDE=OFF -DPYRA_BUILD_BRIDGE=OFF -DPYRA_BUILD_WEB_TEST=OFF -DPYRA_BUILD_GUI_TEST=OFF -DBUILD_TESTING=OFF -DPYRA_ENABLE_IPO=OFF -DPYRA_ENABLE_AVX2=OFF
+emcmake cmake -G Ninja -S . -B ../out/Pyra/build/wasm -DCMAKE_BUILD_TYPE=Release -DPYRA_LINUX_SDK=../out/Pyra/build/wasm-deps/install -DPYR_WITH_OPENJPH=ON -DPYR_WITH_JXL=ON -DPYR_WITH_DCMTK=OFF -DPYR_WITH_CZI=OFF -DPYRA_WITH_OPENSLIDE=OFF -DPYRA_BUILD_BRIDGE=OFF -DPYRA_BUILD_WEB_TEST=OFF -DPYRA_BUILD_GUI_TEST=OFF -DBUILD_TESTING=OFF -DPYRA_ENABLE_IPO=OFF -DPYRA_ENABLE_AVX2=OFF
 cmake --build ../out/Pyra/build/wasm --target pyra_client
 ```
 
-It was developed with emsdk 4.0.20. Then configure the native viewer with
+It was developed with emsdk 4.0.20. The codec SDK includes the bundled libjxl
+0.11.0 (`Deps/libjxl`), so JPEG XL needs no separate step. Every object of the
+client is built with threads (`-pthread`, libjxl's
+`JPEGXL_ENABLE_WASM_THREADS`), as WebAssembly shared memory requires; libjxl
+itself runs single-threaded per tile, the client's pool decoding tiles in
+parallel. For a client without JPEG XL, pass `-DPYRA_DEPENDENCY_JXL=OFF` to the
+SDK and `-DPYR_WITH_JXL=OFF` to the client; its JPEG XL planes are then
+rendered by the server.
+
+The SDK and the client are built with WebAssembly SIMD (`-msimd128`), which
+Highway (libjxl), OpenJPH and the compiler's autovectorizer use. Measured
+against the same client without it (median client time of the four-view pass,
+3-5 runs): lossy JPEG XL 191 to 145 ms; lossless JPEG XL 187 to 180 ms, JPEG
+2000 508 to 494 ms, and JPEG XR, JPEG, HTJ2K and NDPI within run-to-run noise;
+`pyra_client.wasm` grows from 3.06 to 3.18 MB. A browser without wasm SIMD
+(Chrome < 91, Firefox < 89, Safari < 16.4) cannot compile the module and gets
+server rendering, like a page that is not cross-origin isolated.
+
+Then configure the native viewer with
 `-DPYRA_WEB_CLIENT_DIR=<wasm build>/ViewW/wasm`: the server embeds
 `pyra_client.js` and `pyra_client.wasm` and stays one self-contained executable.
 The embedding needs only CMake, so the pair can be built once and copied to a
 machine without Emscripten. Copy both files together, since each `.js` loads only
-its own `.wasm`. Rebuild them after changing what the client contains:
+its own `.wasm`, with the `third-party/` directory beside them: it holds the
+notices of libjxl and the libraries it bundles, which the viewer installs under
+`share/Pyra/third-party/`. Rebuild them after changing what the client contains:
 - the geometry and tile formats (`Core/remote_pyramid.*`, the CZI sub-block
   descriptor, synthetic-tile encodings);
 - the exports `client_worker.js` calls;
@@ -230,10 +259,22 @@ same-origin workers.
 ## Rendering and limits
 
 Rendering runs on HTTP worker threads, separate from browser interaction.
+Each rendered frame is the view plus a halo band on every side, capped per axis
+at the 4096-pixel limit. The toolbar's **Halo** field sets the band as a
+percentage of the view's raster width, 0-50% (0 renders only the visible view);
+a change re-renders the view at once, and each browser remembers its own value.
+The server's `--view-halo PERCENT` sets the default (20%, `kViewHaloDefaultPercent`
+in `web_server.h`), sent to the page with `/api/state`. Panning reuses the frame shown, or the one in flight, until the
+view has used up half of its actual halo on any side; a frame centred on the view
+is then requested, so it normally arrives before the halo's edge comes into
+view. Navigation schedules at most one render per 35 ms (`kRenderDelayMs`) and
+does not wait for the motion to stop. At 20% a 16:9 view renders about 2.4 times
+its own pixels, at 10% about 1.6 times.
 The UI retains only the latest pending view and allows one native request at
 a time. The server serializes open/render access, bounds its HTTP worker
 queue, and checks an image generation on each render. The browser discards
-results after view/plane/image changes. An interrupted HTTP request cannot
+results after plane/image changes; a frame of an earlier view of the same plane
+is still shown, placed by its own rectangle. An interrupted HTTP request cannot
 cancel an already-running native render. Tile and geometry requests wait for the
 slide instead of being refused, and the server runs 32 HTTP workers with a 5 s
 keep-alive (`kHttpWorkerThreads`, `kKeepAliveSeconds`): cpp-httplib holds a
@@ -249,7 +290,7 @@ viewer. Raw scientific pixels remain available through the native C API.
 No additional image encoder or JSON library is needed.
 
 Both raster axes are limited to 4096 pixels; the minimap's maximum edge is
-256. Ordinary viewport requests match physical display pixels; exceptionally
+256. Ordinary viewport requests match physical display pixels (plus the halo); exceptionally
 large windows use a coarser bounded raster. A 4096-square display frame is
 64 MiB, plus the native sample buffer, display conversion, HTTP and browser
 copies. These limits bound caller-owned rasters, not overall process memory.

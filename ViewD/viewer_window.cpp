@@ -28,6 +28,7 @@
 #include <QProgressBar>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTextCursor>
@@ -87,6 +88,16 @@ ViewerWindow::ViewerWindow ( const QString &image_directory )
 	planes_->setAccessibleName( tr( "Channel and focal plane" ) );
 	planes_->setToolTip( tr( "Channel, focal-plane Z, and available pyramid levels" ) );
 	toolbar->addWidget( planes_ );
+	halo_ = new QSpinBox( toolbar );
+	halo_->setObjectName( QStringLiteral( "viewHalo" ) );
+	halo_->setRange( 0, kViewHaloMaxPercent );
+	halo_->setValue( kViewHaloDefaultPercent );
+	halo_->setPrefix( tr( "Halo " ) );
+	halo_->setSuffix( tr( " %" ) );
+	halo_->setAccessibleName( tr( "View halo, percent of the view width" ) );
+	halo_->setToolTip( tr( "Image rendered around the view on every side, as a percentage of the view width. "
+		"Panning reuses it; 0 renders only the visible view." ) );
+	toolbar->addWidget( halo_ );
 	toolbar->addSeparator();
 	record_ = toolbar->addAction( tr( "Record" ) );
 	record_->setToolTip( tr( "Start a new in-memory recording of every actual render call" ) );
@@ -176,6 +187,12 @@ ViewerWindow::ViewerWindow ( const QString &image_directory )
 			select_plane( index, true );
 		}
 	} );
+// A new halo size applies at once: the shown image is re-rendered with it.
+	connect( halo_, &QSpinBox::valueChanged, this, [this] {
+		displayed_request_.reset();
+		if (!debounce_.isActive())
+			debounce_.start();
+	} );
 	connect( record_, &QAction::triggered, this, &ViewerWindow::record );
 	connect( stop_, &QAction::triggered, this, &ViewerWindow::stop );
 	connect( replay_, &QAction::triggered, this, &ViewerWindow::replay );
@@ -192,6 +209,18 @@ ViewerWindow::~ViewerWindow ()
 	evaluator_->cancel_replay();
 	thread_.quit();
 	thread_.wait();
+}
+
+
+int ViewerWindow::view_halo_percent () const
+{
+	return halo_->value();
+}
+
+
+void ViewerWindow::set_view_halo_percent ( int percent )
+{
+	halo_->setValue( percent );
 }
 
 
@@ -332,6 +361,8 @@ void ViewerWindow::generate_dialog ()
 		return;
 	}
 	auto options = dialog.options();
+// An untiled TIFF is not a slide PyrA opens directly (it goes through a gallery).
+	const auto open_result = !dialog.untiled();
 	generating_ = true;
 	generation_cancel_.store( false );
 	busy_->setRange( 0, kGenerateProgressSteps );
@@ -340,7 +371,7 @@ void ViewerWindow::generate_dialog ()
 	update_controls();
 	if (generator_.joinable())
 		generator_.join();
-	generator_ = std::jthread( [this, path, options] () mutable {
+	generator_ = std::jthread( [this, path, options, open_result] () mutable {
 		options.progress_user = this;
 		options.progress = [] ( void *user, uint64_t done, uint64_t total ) -> int {
 			auto *window = static_cast<ViewerWindow *>( user );
@@ -355,13 +386,14 @@ void ViewerWindow::generate_dialog ()
 		auto error = pyra_error{};
 		const auto status = pyra_make_synthetic( &options, path.toUtf8().constData(), &error );
 		const auto message = status == PYRA_OK ? QString{} : QString::fromUtf8( error.message );
-		QMetaObject::invokeMethod( this, [this, path, message] { generation_finished( path, message ); },
-			Qt::QueuedConnection );
+		QMetaObject::invokeMethod( this, [this, path, message, open_result] {
+			generation_finished( path, message, open_result );
+		}, Qt::QueuedConnection );
 	} );
 }
 
 
-void ViewerWindow::generation_finished ( const QString &path, const QString &error )
+void ViewerWindow::generation_finished ( const QString &path, const QString &error, bool open_result )
 {
 	generating_ = false;
 	busy_->setRange( 0, 0 );
@@ -371,7 +403,8 @@ void ViewerWindow::generation_finished ( const QString &path, const QString &err
 		return;
 	}
 	report_message( tr( "Generated %1" ).arg( path ) );
-	open( path, reader_options_ );
+	if (open_result)
+		open( path, reader_options_ );
 }
 
 
@@ -466,15 +499,15 @@ void ViewerWindow::schedule_render ()
 		double( viewport_->width() ) / output.width(), double( viewport_->height() ) / output.height() );
 	const auto view = RenderRequest{ viewport_->view_rect(), mpp, plane_info_[index].plane };
 	latest_view_ = view;
-	if (( displayed_request_ && view_request_is_covered( *displayed_request_, view ) ) ||
-		( active_request_ && view_request_is_covered( *active_request_, view ) )) {
+	if (( displayed_request_ && !view_request_needs_refresh( *displayed_request_, view ) ) ||
+		( active_request_ && !view_request_needs_refresh( *active_request_, view ) )) {
 		pending_.reset();
 		if (smoke_step_ >= 0)
 			QTimer::singleShot( 0, this, &ViewerWindow::smoke_frame );
 		return;
 	}
 	pending_ = overscan_failed_mpp_ && *overscan_failed_mpp_ == view.mpp
-		? view : prepare_view_request( view );
+		? view : prepare_view_request( view, halo_->value() );
 	dispatch_render();
 }
 

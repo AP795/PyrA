@@ -29,3 +29,20 @@ target_link_options(pyra_client PRIVATE
 	-sPTHREAD_POOL_SIZE=${PYRA_CLIENT_MAX_THREADS}
 	"-sEXPORTED_FUNCTIONS=${pyra_client_export_list}"
 	-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32,UTF8ToString)
+
+# The notices of the bundled libjxl (Deps/libjxl, built into the codec SDK) and
+# of the libraries it bundles travel with the client in third-party/, laid out
+# as the native install's notices, which the viewer installs them beside.
+if(PYR_WITH_JXL)
+	set(pyra_jxl_source "${PROJECT_SOURCE_DIR}/Deps/libjxl")
+	set(pyra_jxl_notices libjxl:LICENSE libjxl:PATENTS libjxl:SOURCE-NOTICES.txt
+		highway:third_party/highway/LICENSE highway:third_party/highway/LICENSE-BSD3
+		brotli:third_party/brotli/LICENSE skcms:third_party/skcms/LICENSE)
+	foreach(notice IN LISTS pyra_jxl_notices)
+		string(REPLACE ":" ";" notice "${notice}")
+		list(GET notice 0 component)
+		list(GET notice 1 file)
+		get_filename_component(name "${file}" NAME)
+		configure_file("${pyra_jxl_source}/${file}" "${CMAKE_CURRENT_BINARY_DIR}/third-party/${component}/${name}" COPYONLY)
+	endforeach()
+endif()

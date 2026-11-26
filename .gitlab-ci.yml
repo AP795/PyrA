@@ -4,7 +4,7 @@
 
 # GitLab CI for PyrA: Linux builds and headless tests of the two viewers.
 #
-# Every push runs web-linux (Qt-free pyra_web_test) and gui-linux (Qt viewer,
+# Every push runs web-linux (Qt-free PyrA_Web_Viewer) and gui-linux (Qt viewer,
 # offscreen). A tag additionally packs the web viewer, uploads it to the
 # project's Generic Package Registry and creates a GitLab Release.
 # Real-slide, browser and Windows checks stay manual (see the READMEs).
@@ -17,8 +17,8 @@ stages:
 variables:
   DEBIAN_FRONTEND: noninteractive
   PYRA_SDK: "$CI_PROJECT_DIR/out/Deps/linux/install"
-  BUNDLE: "pyra_web_test-linux-x64.tar.gz"
-  PACKAGE_URL: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/pyra_web_test/$CI_COMMIT_TAG/pyra_web_test-linux-x64.tar.gz"
+  BUNDLE: "PyrA_Web_Viewer-linux-x64.tar.gz"
+  PACKAGE_URL: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/PyrA_Web_Viewer/$CI_COMMIT_TAG/PyrA_Web_Viewer-linux-x64.tar.gz"
 
 # Both viewers use the same bundled codec SDK on Ubuntu 24.04.
 .linux-build:
@@ -52,7 +52,7 @@ web-linux:
   script:
     - !reference [.linux-build, script]
     - cmake --install out/build/ci --prefix "$CI_PROJECT_DIR/out/install/ci"
-    - out/install/ci/bin/pyra_web_test --help
+    - out/install/ci/bin/PyrA_Web_Viewer --help
     - tar -czf "out/$BUNDLE" -C out/install/ci .
   artifacts:
     when: always
@@ -94,8 +94,8 @@ release-web:
     tag_name: "$CI_COMMIT_TAG"
     name: "PyrA $CI_COMMIT_TAG"
     description: >-
-      Linux x64 build of the localhost web viewer pyra_web_test (Ubuntu 24.04,
-      GCC 13). Extract and run bin/pyra_web_test --root IMAGE_DIRECTORY.
+      Linux x64 build of the localhost web viewer PyrA_Web_Viewer (Ubuntu 24.04,
+      GCC 13). Extract and run bin/PyrA_Web_Viewer --root IMAGE_DIRECTORY.
       The reader includes the bundled codec libraries and DCMTK.
     assets:
       links:

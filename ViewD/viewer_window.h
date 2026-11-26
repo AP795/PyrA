@@ -22,6 +22,7 @@ class QLabel;
 class QPlainTextEdit;
 class QProgressBar;
 class QSlider;
+class QSpinBox;
 class QSplitter;
 
 namespace pyra::test {
@@ -40,13 +41,15 @@ public:
 	void smoke_test ( const QString &output_directory );
 	void report_message ( const QString &message );
 	const QString &last_loaded_image () const { return last_loaded_image_; }
+	int view_halo_percent () const;
+	void set_view_halo_percent ( int percent );
 
 private:
 	void select_plane ( int index, bool preserve_view = false );
 	void update_z_slider ( int index );
 	void open_dialog ( pyra_backend backend );
 	void generate_dialog ();
-	void generation_finished ( const QString &path, const QString &error );
+	void generation_finished ( const QString &path, const QString &error, bool open_result );
 	void schedule_render ();
 	void dispatch_render ();
 	void update_controls ();
@@ -62,6 +65,7 @@ private:
 	Minimap *minimap_ = nullptr;
 	CacheUsageWidget *cache_usage_ = nullptr;
 	QComboBox *planes_ = nullptr;
+	QSpinBox *halo_ = nullptr;
 	QWidget *z_control_ = nullptr;
 	QSlider *z_slider_ = nullptr;
 	QLabel *z_label_ = nullptr;

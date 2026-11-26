@@ -532,11 +532,17 @@ bool fail ( std::string *error, std::string message )
 }
 
 
-long long tile_count ( const Dim2D<int> &size, int tile_edge ) noexcept
+long long tile_count ( const Dim2D<int> &size, const Dim2D<int> &cell ) noexcept
 {
-	const auto tx = ( static_cast<long long>( size.w ) + tile_edge - 1 ) / tile_edge;
-	const auto ty = ( static_cast<long long>( size.h ) + tile_edge - 1 ) / tile_edge;
+	const auto tx = ( static_cast<long long>( size.w ) + cell.w - 1 ) / cell.w;
+	const auto ty = ( static_cast<long long>( size.h ) + cell.h - 1 ) / cell.h;
 	return tx * ty;
+}
+
+
+Dim2D<int> square_cell ( const SyntheticSlideSpec &spec ) noexcept
+{
+	return { spec.tile_edge, spec.tile_edge };
 }
 
 
@@ -544,7 +550,7 @@ long long stack_tile_count ( const SyntheticSlideSpec &spec, int levels )
 {
 	auto total = 0ll;
 	for (auto level = 0; level < levels; ++level)
-		total += tile_count( synthetic_level_size( spec, level ), spec.tile_edge );
+		total += tile_count( synthetic_level_size( spec, level ), square_cell( spec ) );
 	return total * spec.z_levels;
 }
 
@@ -553,26 +559,27 @@ long long stack_tile_count ( const SyntheticSlideSpec &spec, int levels )
 constexpr size_t kBatchBytes = size_t{ 256 } << 20;
 
 
-// PtfWriter pulls one tile at a time in row-major order. Rendering is the cost,
-// so the tiles it is about to ask for are rendered a batch at a time on every
-// core and handed out from there. Pixels do not depend on the batching.
+// The writers pull one cell - a tile, or a strip of an untiled image - at a time
+// in row-major order. Rendering is the cost, so the cells about to be asked for
+// are rendered a batch at a time on every core and handed out from there. Pixels
+// do not depend on the batching.
 class TileBatcher {
 public:
-	TileBatcher ( const SyntheticSlideSpec &spec, int level, int z )
-		: spec_( spec ), level_( level ), z_( z ),
+	TileBatcher ( const SyntheticSlideSpec &spec, int level, int z, const Dim2D<int> &cell )
+		: spec_( spec ), level_( level ), z_( z ), cell_( cell ),
 		size_( synthetic_level_size( spec, level ) ),
-		columns_( ( size_.w + spec.tile_edge - 1 ) / spec.tile_edge ),
-		count_( tile_count( size_, spec.tile_edge ) ),
+		columns_( ( size_.w + cell.w - 1 ) / cell.w ),
+		count_( tile_count( size_, cell ) ),
 		threads_( static_cast<int>( std::max( 1u, std::thread::hardware_concurrency() ) ) )
 	{
-		const auto tile_bytes = static_cast<size_t>( spec.tile_edge ) * spec.tile_edge * sizeof( Rgb8 );
+		const auto tile_bytes = static_cast<size_t>( cell.w ) * cell.h * sizeof( Rgb8 );
 		batch_ = static_cast<int>( std::clamp<size_t>( kBatchBytes / tile_bytes, 1,
 			static_cast<size_t>( 4 * threads_ ) ) );
 	}
 
 	void fetch ( const Rtlbr<int> &rect, Pwhl<Rgb8> *out ) {
-		const auto index = static_cast<long long>( rect.tl.y / spec_.tile_edge ) * columns_ +
-			rect.tl.x / spec_.tile_edge;
+		const auto index = static_cast<long long>( rect.tl.y / cell_.h ) * columns_ +
+			rect.tl.x / cell_.w;
 		if (index < first_ || index >= first_ + static_cast<long long>( tiles_.size() ))
 			render_batch( index );
 		const auto &tile = tiles_[static_cast<size_t>( index - first_ )];
@@ -585,10 +592,10 @@ private:
 	Rtlbr<int> rect_of ( long long index ) const {
 		const auto tx = static_cast<int>( index % columns_ );
 		const auto ty = static_cast<int>( index / columns_ );
-		const auto x0 = tx * spec_.tile_edge;
-		const auto y0 = ty * spec_.tile_edge;
-		return { { x0, y0 }, { std::min( x0 + spec_.tile_edge, size_.w ),
-			std::min( y0 + spec_.tile_edge, size_.h ) } };
+		const auto x0 = tx * cell_.w;
+		const auto y0 = ty * cell_.h;
+		return { { x0, y0 }, { std::min( x0 + cell_.w, size_.w ),
+			std::min( y0 + cell_.h, size_.h ) } };
 	}
 
 	void render_batch ( long long first ) {
@@ -613,6 +620,7 @@ private:
 
 	const SyntheticSlideSpec &spec_;
 	int level_, z_;
+	Dim2D<int> cell_;
 	Dim2D<int> size_;
 	int columns_;
 	long long count_;
@@ -622,7 +630,48 @@ private:
 	std::vector<Pwhl<Rgb8>> tiles_;
 };
 
+
+// The base level of plane 0 as an untiled TIFF, strip by strip.
+bool write_synthetic_image ( const std::string &filename_utf8, const SyntheticSlideSpec &spec,
+	const SyntheticProgress &progress, std::string *error )
+{
+	auto strips = TiffStripSpec{};
+	strips.size = spec.size;
+	strips.rows_per_strip = kSynthStripRows;
+	strips.codec = spec.codec == ImgCodec::Lzw ? TiffStripCodec::Lzw : TiffStripCodec::Jpeg;
+	strips.quality = spec.quality;
+	strips.mpp = spec.mpp;
+	strips.software = "PyrA synthetic slide";
+	const auto cell = Dim2D<int>{ spec.size.w, kSynthStripRows };
+	const auto total = tile_count( spec.size, cell );
+	auto batcher = TileBatcher( spec, 0, 0, cell );
+	auto done = 0ll;
+	const auto fetch = TiffStripFetch( [&] ( const Rtlbr<int> &rect, Pwhl<Rgb> *strip ) {
+		batcher.fetch( rect, strip );
+		++done;
+		return !progress || progress( done, total );
+	} );
+	return tiff_image_write_strips( pyr::path_from_utf8( filename_utf8 ), strips, fetch, error );
+}
+
 } // namespace
+
+
+bool synthetic_codec_allowed ( ImgCodec codec, bool untiled ) noexcept
+{
+	if (untiled)
+		return codec == ImgCodec::Lzw || codec == ImgCodec::Jpeg;
+	return codec == ImgCodec::Jpeg || codec == ImgCodec::Jp2k || codec == ImgCodec::Htj2k ||
+		codec == ImgCodec::Jxl || codec == ImgCodec::JpegXr;
+}
+
+
+// libtiff always codes LZW and JPEG strips; tiles go through encode_tile.
+bool synthetic_can_encode ( ImgCodec codec, bool untiled ) noexcept
+{
+	return synthetic_codec_allowed( codec, untiled ) &&
+		( codec == ImgCodec::Lzw || img_codec_can_encode( codec ) );
+}
 
 
 bool synthetic_spec_valid ( const SyntheticSlideSpec &spec, std::string *error )
@@ -633,28 +682,38 @@ bool synthetic_spec_valid ( const SyntheticSlideSpec &spec, std::string *error )
 		return fail( error, std::format( "Image size must be 1..{} pixels per edge",
 			kSynthImageEdgeMax ) );
 	}
-	if (spec.tile_edge < kSynthTileEdgeMin || spec.tile_edge > kSynthTileEdgeMax ||
-		spec.tile_edge % kSynthTileEdgeStep != 0)
+	const auto untiled = synthetic_untiled( spec );
+	if (!untiled && ( spec.tile_edge < kSynthTileEdgeMin || spec.tile_edge > kSynthTileEdgeMax ||
+		spec.tile_edge % kSynthTileEdgeStep != 0 ))
 	{
-		return fail( error, std::format( "Tile edge must be a multiple of {} in {}..{}",
-			kSynthTileEdgeStep, kSynthTileEdgeMin, kSynthTileEdgeMax ) );
+		return fail( error, std::format( "Tile edge must be {} (untiled) or a multiple of {} in {}..{}",
+			kSynthUntiledTileEdge, kSynthTileEdgeStep, kSynthTileEdgeMin, kSynthTileEdgeMax ) );
+	}
+	if (untiled && ( spec.size.w > kSynthUntiledEdgeMax || spec.size.h > kSynthUntiledEdgeMax )) {
+		return fail( error, std::format( "An untiled image must be 1..{} pixels per edge",
+			kSynthUntiledEdgeMax ) );
 	}
 	if (spec.z_levels < 1 || spec.z_levels > kSynthZLevelsMax)
 		return fail( error, std::format( "Z levels must be 1..{}", kSynthZLevelsMax ) );
+	if (untiled && spec.z_levels != 1)
+		return fail( error, "An untiled image holds one focal plane: Z levels must be 1" );
 	if (!std::isfinite( spec.mpp ) || spec.mpp < kSynthMppMin || spec.mpp > kSynthMppMax)
 		return fail( error, std::format( "Microns per pixel must be {}..{}", kSynthMppMin, kSynthMppMax ) );
-	if (spec.codec != ImgCodec::Jpeg && spec.codec != ImgCodec::Jp2k &&
-		spec.codec != ImgCodec::Htj2k && spec.codec != ImgCodec::Jxl)
-	{
-		return fail( error, "Compression must be JPEG, JPEG 2000, HTJ2K or JPEG XL" );
+	if (!synthetic_codec_allowed( spec.codec, untiled )) {
+		return fail( error, untiled ? "Compression of an untiled image must be LZW or JPEG"
+			: spec.codec == ImgCodec::Lzw ? "LZW is for untiled images only (tile size 0)"
+			: "Compression must be JPEG, JPEG 2000, HTJ2K, JPEG XL or JPEG XR" );
 	}
-	if (!img_codec_can_encode( spec.codec )) {
+	if (!synthetic_can_encode( spec.codec, untiled )) {
 		const auto *option = spec.codec == ImgCodec::Jp2k ? "USE_OPENJPEG"
-			: spec.codec == ImgCodec::Htj2k ? "USE_OPENJPH" : "USE_JXL";
+			: spec.codec == ImgCodec::Htj2k ? "USE_OPENJPH"
+			: spec.codec == ImgCodec::JpegXr ? "USE_JXR" : "USE_JXL";
 		return fail( error, std::format( "{} compression is unavailable: built without {}",
 			img_codec_name( spec.codec ), option ) );
 	}
-	if (spec.quality == kImageLosslessQuality) {
+	if (spec.codec == ImgCodec::Lzw) {
+// Always lossless; the quality is not used.
+	} else if (spec.quality == kImageLosslessQuality) {
 		if (!img_codec_supports_lossless( spec.codec ))
 			return fail( error, std::format( "{} has no lossless mode", img_codec_name( spec.codec ) ) );
 	} else if (spec.quality < kImageQualityMin || spec.quality > kImageLossyQualityMax) {
@@ -691,6 +750,8 @@ bool synthetic_spec_valid ( const SyntheticSlideSpec &spec, std::string *error )
 int synthetic_level_count ( const SyntheticSlideSpec &spec )
 {
 	auto count = 1;
+	if (synthetic_untiled( spec ))
+		return count;
 	auto size = spec.size;
 	while (size.w > spec.tile_edge || size.h > spec.tile_edge) {
 		size = { ( size.w + 1 ) / 2, ( size.h + 1 ) / 2 };
@@ -779,6 +840,8 @@ bool write_synthetic_slide ( const std::string &filename_utf8,
 {
 	if (!synthetic_spec_valid( spec, error ))
 		return false;
+	if (synthetic_untiled( spec ))
+		return write_synthetic_image( filename_utf8, spec, progress, error );
 	const auto levels = synthetic_level_count( spec );
 	const auto total = stack_tile_count( spec, levels );
 
@@ -804,7 +867,7 @@ bool write_synthetic_slide ( const std::string &filename_utf8,
 			level_spec.tags.zlevel = static_cast<float>( z * spec.z_step_um );
 			level_spec.tags.mpp = spec.mpp * std::ldexp( 1.0, level );
 			level_spec.tags.max_pixel_value = 255;
-			auto batcher = TileBatcher( spec, level, z );
+			auto batcher = TileBatcher( spec, level, z, square_cell( spec ) );
 			auto fetch = PtfTileFetch<Rgb8>(
 				[&] ( const Rtlbr<int> &rect, Pwhl<Rgb8> *tile ) {
 					if (cancelled)
@@ -845,6 +908,8 @@ bool write_synthetic_dicom ( const std::filesystem::path &entry, const Synthetic
 {
 	if (!synthetic_dicom_can_encode( spec.codec ))
 		return fail( error, "DICOM generation needs DCMTK and an enabled JPEG, JPEG 2000 or HTJ2K encoder" );
+	if (synthetic_untiled( spec ))
+		return fail( error, "A DICOM WSI needs a tile size; tile 0 (untiled) is TIFF only" );
 	if (!synthetic_spec_valid( spec, error ))
 		return false;
 	const auto auxiliary = dcm_pyramid_aux_directory( entry );
@@ -920,7 +985,7 @@ bool write_synthetic_dicom ( const std::filesystem::path &entry, const Synthetic
 		auto current_z = -1;
 		const auto fetch = DcmFocalTileFetch<Rgb>( [&] ( int z, const auto &rect, auto *tile, auto *tile_error ) {
 			if (z != current_z) {
-				batcher.emplace( spec, level, z );
+				batcher.emplace( spec, level, z, square_cell( spec ) );
 				current_z = z;
 			}
 			batcher->fetch( rect, tile );

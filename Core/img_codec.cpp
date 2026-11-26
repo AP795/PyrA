@@ -6,6 +6,7 @@
 
 #include "img_czi.h"
 #include "img_htj2k.h"
+#include "img_jxr.h"
 #include "img_tiff.h"
 #include "pyr_rt.h"
 
@@ -59,8 +60,10 @@ namespace priml {
 
 const char *const img_codec_names[] = {
 	"none", "JPEG", "JPEG 2000", "JPEG-LS", "JPEG XL", "CZI sub-block",
-	"TIFF", "raw samples", "HTJ2K", ""
+	"TIFF", "raw samples", "HTJ2K", "JPEG XR", "LZW", ""
 };
+static_assert( std::size( img_codec_names ) == size_t( ImgCodec::Last ) + 1,
+	"img_codec_names must name every ImgCodec" );
 
 
 const char *img_codec_name ( ImgCodec codec )
@@ -81,6 +84,9 @@ const char *img_codec_unavailable_reason ( ImgCodec codec ) noexcept
 #if !USE_OPENJPEG
 	case ImgCodec::Jp2k: return "Unsupported compression: JPEG 2000 (this build has PYR_WITH_OPENJPEG=OFF).";
 #endif
+#if !USE_JXR
+	case ImgCodec::JpegXr: return "Unsupported compression: JPEG XR (this build has PYR_WITH_JXR=OFF).";
+#endif
 	case ImgCodec::JpegLs: return "Unsupported compression: JPEG-LS (no JPEG-LS decoder is built into Pyra).";
 	default: return nullptr;
 	}
@@ -94,6 +100,7 @@ std::string_view img_codec_id ( ImgCodec codec )
 	case ImgCodec::Jp2k: return "jp2k";
 	case ImgCodec::Htj2k: return "htj2k";
 	case ImgCodec::Jxl: return "jxl";
+	case ImgCodec::JpegXr: return "jxr";
 	default: return {};
 	}
 }
@@ -103,7 +110,7 @@ bool parse_img_codec_id ( std::string_view text, ImgCodec *codec )
 {
 	if (!codec)
 		return false;
-	for (auto candidate : { ImgCodec::Jpeg, ImgCodec::Jp2k, ImgCodec::Htj2k, ImgCodec::Jxl }) {
+	for (auto candidate : { ImgCodec::Jpeg, ImgCodec::Jp2k, ImgCodec::Htj2k, ImgCodec::Jxl, ImgCodec::JpegXr }) {
 		if (text == img_codec_id( candidate )) {
 			*codec = candidate;
 			return true;
@@ -134,6 +141,8 @@ static constexpr struct {
 	{ ImgCodec::Jxl,    { 0xFF, 0x0A }, 2 },
 	{ ImgCodec::Jpeg,   { 0xFF, 0xD8, 0xFF }, 3 },
 	{ ImgCodec::CziSubBlock, { 'C', 'Z', 'S', 'B' }, 4 },
+// JPEG XR's container is TIFF-like but marked 0xBC where TIFF has 0x2A/0x2B.
+	{ ImgCodec::JpegXr, { 'I', 'I', 0xBC, 0x01 }, 4 },
 	{ ImgCodec::Tiff,   { 'I', 'I', 0x2A, 0x00 }, 4 },
 	{ ImgCodec::Tiff,   { 'M', 'M', 0x00, 0x2A }, 4 },
 	{ ImgCodec::Tiff,   { 'I', 'I', 0x2B, 0x00 }, 4 },		// BigTIFF
@@ -176,7 +185,8 @@ static void MaybeDumpFailingTile ( ImgCodec codec, const TileDiag &diag,
 	std::filesystem::create_directories( "test_out", ec );
 
 	auto ext = codec == ImgCodec::Jp2k ? "jp2"
-		: codec == ImgCodec::Jxl ? "jxl" : codec == ImgCodec::Htj2k ? "j2c" : "jpg";
+		: codec == ImgCodec::Jxl ? "jxl" : codec == ImgCodec::Htj2k ? "j2c"
+		: codec == ImgCodec::JpegXr ? "jxr" : "jpg";
 	char name[128];
 	snprintf( name, sizeof( name ), "wsi_decode_fail_L%d_T%d.%s",
 		diag.level_no, diag.tile_no, ext );
@@ -1969,6 +1979,13 @@ bool decode_tile ( const uint8_t *bf, size_t len, ColorHint hint,
 		case ImgCodec::CziSubBlock:
 			ok = DecodeCziSubBlock( bf, len, dst, diag );
 			break;
+		case ImgCodec::JpegXr: {
+			auto error = std::string{};
+			ok = jxr_decode( bf, len, dst, &error );
+			if (!ok)
+				LogDecodeFailure( codec, diag, bf, len, error.c_str() );
+			break;
+		}
 		case ImgCodec::RawSamples:
 			ok = DecodeRawSamples( bf, len, dst, diag );
 			break;
@@ -2071,6 +2088,8 @@ bool read_img_codec_info ( const uint8_t *bf, size_t len, ImgCodecInfo *out,
 		out->is_float = info.is_float;
 		return true;
 	}
+	case ImgCodec::JpegXr:
+		return jxr_read_info( bf, len, out, error );
 	default:
 		return SetCodecError( error, codec == ImgCodec::None
 			? "unrecognized image signature"
@@ -2137,6 +2156,8 @@ bool encode_tile ( ImgCodec codec, const Pwhl<pixeltype> &image,
 #endif
 	case ImgCodec::Jxl:
 		return jxl_encode( image, out, error, options );
+	case ImgCodec::JpegXr:
+		return jxr_encode( image, out, options, error );
 	default:
 		break;
 	}

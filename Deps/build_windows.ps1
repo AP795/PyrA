@@ -6,8 +6,8 @@ param(
 	[string]$BuildRoot = '',
 	[ValidateSet('Release', 'Debug')]
 	[string[]]$Configurations = @('Release', 'Debug'),
-	[ValidateSet('Btf', 'OpenJPH', 'DCMTK')]
-	[string[]]$Components = @('Btf', 'OpenJPH', 'DCMTK'),
+	[ValidateSet('Btf', 'OpenJPH', 'DCMTK', 'JXL')]
+	[string[]]$Components = @('Btf', 'OpenJPH', 'DCMTK', 'JXL'),
 	[string]$CMake = 'cmake.exe',
 	[ValidateRange(1, 64)]
 	[int]$Jobs = 4
@@ -73,5 +73,18 @@ if ('DCMTK' -in $Components) {
 		'-DDCMTK_WITH_SNDFILE=OFF', '-DDCMTK_WITH_TIFF=OFF', '-DDCMTK_WITH_XML=OFF',
 		'-DDCMTK_WITH_ZLIB=OFF', '-DDCMTK_WITH_THREADS=ON'
 	) -InstallPerConfig
+}
+if ('JXL' -in $Components) {
+	$source = Join-Path $PSScriptRoot 'libjxl'
+	$prefix = Join-Path $sdk 'jxl'
+	Build-Sdk $source 'jxl' $prefix @('-C', (Join-Path $PSScriptRoot 'libjxl_options.cmake')) -InstallPerConfig
+	$notices = Join-Path $prefix 'share/pyra-dependencies'
+	foreach ($notice in @(
+		@('libjxl', 'LICENSE'), @('libjxl', 'PATENTS'), @('libjxl', 'SOURCE-NOTICES.txt'),
+		@('highway', 'third_party/highway/LICENSE'), @('highway', 'third_party/highway/LICENSE-BSD3'),
+		@('brotli', 'third_party/brotli/LICENSE'), @('skcms', 'third_party/skcms/LICENSE'))) {
+		$folder = New-Item -ItemType Directory -Path (Join-Path $notices $notice[0]) -Force
+		Copy-Item -LiteralPath (Join-Path $source $notice[1]) -Destination $folder.FullName
+	}
 }
 Write-Output "Bundled Windows SDK: $sdk"

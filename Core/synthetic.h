@@ -22,9 +22,14 @@
 // distance between the plane and the object's own depth. The in-focus depth
 // sits at focus_fraction of the stack; by default a four-plane stack is sharp at
 // z1, slightly soft at z2 and blurred at z0 and z3.
+//
+// Tile edge kSynthUntiledTileEdge (0) writes a plain untiled TIFF instead: the base
+// level of one focal plane, strips of LZW or JPEG, which any TIFF reader opens
+// (PyrA through a gallery).
 
 #include "geom.h"
 #include "img_codec.h"
+#include "img_tiff.h"
 #include "pwhl.h"
 
 #include <cstdint>
@@ -39,6 +44,14 @@ inline constexpr int kSynthTileEdgeMax = 2048;
 // TIFF tiles must be multiples of 16.
 inline constexpr int kSynthTileEdgeStep = 16;
 inline constexpr int kSynthImageEdgeMax = 1 << 20;
+// Tile edge selecting an untiled TIFF.
+inline constexpr int kSynthUntiledTileEdge = 0;
+// An untiled image is decoded as one raster by its readers, PyrA's gallery included:
+// 16384^2 RGB8 is 768 MiB, and even with LZW's worst-case growth the file stays a
+// classic (< 4 GiB) TIFF.
+inline constexpr int kSynthUntiledEdgeMax = 16384;
+// Rows per strip of an untiled TIFF; a multiple of the JPEG YCbCr MCU height.
+inline constexpr int kSynthStripRows = 4 * kTiffJpegStripRowStep;
 inline constexpr int kSynthZLevelsMax = 16;
 inline constexpr double kSynthMppMin = 0.05;
 inline constexpr double kSynthMppMax = 10.0;
@@ -67,11 +80,13 @@ inline constexpr uint64_t kSynthDefaultSeed = 0x5EED'CE11'2026ull;
 
 struct SyntheticSlideSpec {
 	Dim2D<int> size{ 4096, 4096 };
+// kSynthUntiledTileEdge for an untiled TIFF.
 	int tile_edge = 256;
 	int z_levels = 4;
 	double mpp = 0.5;
 	ImgCodec codec = ImgCodec::Jpeg;
-// 1..100 lossy; kImageLosslessQuality for codecs that support lossless.
+// 1..100 lossy; kImageLosslessQuality for codecs that support lossless. LZW
+// ignores it.
 	int quality = kImageDefaultLossyQuality;
 	uint64_t seed = kSynthDefaultSeed;
 	double z_step_um = kSynthZStepDefaultUm;
@@ -102,12 +117,25 @@ struct SyntheticCensus {
 using SyntheticProgress = std::function<bool ( long long done, long long total )>;
 
 
+// Whether `codec` is a compression for this layout: tiled pyramids take JPEG,
+// JPEG 2000, HTJ2K, JPEG XL and JPEG XR; an untiled TIFF takes LZW and JPEG.
+// Says nothing about this build's encoders.
+bool synthetic_codec_allowed ( ImgCodec codec, bool untiled ) noexcept;
+
+// Whether this build can write `codec` for this layout.
+bool synthetic_can_encode ( ImgCodec codec, bool untiled ) noexcept;
+
+constexpr bool synthetic_untiled ( const SyntheticSlideSpec &spec ) noexcept
+{
+	return spec.tile_edge == kSynthUntiledTileEdge;
+}
+
 // Checks every limit above plus codec availability and the codec's lossless
 // support. The message names the offending field.
 bool synthetic_spec_valid ( const SyntheticSlideSpec &spec, std::string *error );
 
 // Number of levels in each plane's ladder: base, then halved until both edges
-// fit one tile.
+// fit one tile. An untiled image has the base only.
 int synthetic_level_count ( const SyntheticSlideSpec &spec );
 
 // Size of ladder level `level` (0 = base).
@@ -122,12 +150,13 @@ void render_synthetic_tile ( const SyntheticSlideSpec &spec, int level, int z,
 // slide). The spec must be valid.
 SyntheticCensus synthetic_census ( const SyntheticSlideSpec &spec, const Rtlbr<int> &rect );
 
-// Writes the whole slide to `filename_utf8`, replacing any existing file.
+// Writes the whole slide to `filename_utf8`, replacing any existing file: a PTF
+// pyramid, or an untiled TIFF when the spec says so.
 bool write_synthetic_slide ( const std::string &filename_utf8,
 	const SyntheticSlideSpec &spec, const SyntheticProgress &progress,
 	std::string *error );
 
-// Writes a synthetic DICOM WSI pyramid, refusing existing output.
+// Writes a synthetic DICOM WSI pyramid, refusing existing output and untiled specs.
 bool synthetic_dicom_can_encode ( ImgCodec codec ) noexcept;
 bool write_synthetic_dicom ( const std::filesystem::path &entry,
 	const SyntheticSlideSpec &spec, const SyntheticProgress &progress, std::string *error );

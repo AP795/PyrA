@@ -83,7 +83,7 @@ QImage display_image ( const std::vector<unsigned char> &pixels,
 } // namespace
 
 
-RenderRequest prepare_view_request ( const RenderRequest &view )
+RenderRequest prepare_view_request ( const RenderRequest &view, int halo_percent )
 {
 	if (!valid_render_request( view ))
 		return view;
@@ -91,9 +91,9 @@ RenderRequest prepare_view_request ( const RenderRequest &view )
 	const auto height = std::ceil( view.xywh.height() / view.mpp );
 	if (width > kMaxRenderEdge || height > kMaxRenderEdge)
 		return view;
-	const auto factor = std::min( { kViewOverscanFactor, kMaxRenderEdge / width, kMaxRenderEdge / height } );
-	const auto raster_width = std::min( double( kMaxRenderEdge ), std::ceil( width * factor ) );
-	const auto raster_height = std::min( double( kMaxRenderEdge ), std::ceil( height * factor ) );
+	const auto band = std::ceil( width * std::clamp( halo_percent, 0, kViewHaloMaxPercent ) / 100.0 );
+	const auto raster_width = width + 2 * std::min( band, std::floor( ( kMaxRenderEdge - width ) / 2 ) );
+	const auto raster_height = height + 2 * std::min( band, std::floor( ( kMaxRenderEdge - height ) / 2 ) );
 	const auto center = view.xywh.center();
 	auto prepared = view;
 	const auto size = QSizeF( raster_width * view.mpp, raster_height * view.mpp );
@@ -106,6 +106,16 @@ bool view_request_is_covered ( const RenderRequest &prepared, const RenderReques
 {
 	return valid_render_request( prepared ) && valid_render_request( view ) &&
 		prepared.plane == view.plane && prepared.mpp == view.mpp && prepared.xywh.contains( view.xywh );
+}
+
+
+bool view_request_needs_refresh ( const RenderRequest &prepared, const RenderRequest &view )
+{
+	if (!view_request_is_covered( prepared, view ))
+		return true;
+	const auto margin_x = std::max( 0.0, ( prepared.xywh.width() - view.xywh.width() ) / 4 );
+	const auto margin_y = std::max( 0.0, ( prepared.xywh.height() - view.xywh.height() ) / 4 );
+	return !prepared.xywh.contains( view.xywh.adjusted( -margin_x, -margin_y, margin_x, margin_y ) );
 }
 
 

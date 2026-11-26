@@ -26,25 +26,30 @@ async function viewer(dicom = true) {
 		});
 		return elements.get(id);
 	}
-	const config = {max_edge: 4096, root: '.', tbf_mib: 32, pbf_mib: 32, threads: 4, synthetic: {
-		codecs: [{id: 1, name: 'JPEG', lossless: false, dicom},
-			{id: 4, name: 'JPEG XL', lossless: true, dicom: false}],
+	const config = {max_edge: 4096, root: '.', tbf_mib: 32, pbf_mib: 32, threads: 4, view_halo: 20, view_halo_max: 50, synthetic: {
+		codecs: [{id: 1, name: 'JPEG', lossless: false, lossy: true, dicom, tiled: true, untiled: true},
+			{id: 4, name: 'JPEG XL', lossless: true, lossy: true, dicom: false, tiled: true, untiled: false},
+			{id: 6, name: 'LZW', lossless: true, lossy: false, dicom: false, tiled: false, untiled: true}],
 		width: 4096, height: 4096, tile: 256, z: 4, mpp: 0.5, codec: 1, quality: 90, tile_min: 64,
-		tile_max: 2048, tile_step: 16, edge_max: 1048576, z_max: 16, mpp_min: 0.05, mpp_max: 10,
+		tile_max: 2048, tile_step: 16, edge_max: 1048576, untiled_edge_max: 16384, z_max: 16, mpp_min: 0.05, mpp_max: 10,
 		z_step: 1, z_step_min: 0.1, z_step_max: 5, focus: 5 / 12, nucleus: 8, nucleus_min: 3, nucleus_max: 40,
 		spacing: 12, spacing_min: 4, spacing_max: 200, positive: 0.3, tumour: 0.4, lymphocytes: 0.4}};
+// Armed timers are kept so a test can fire them; the script holds the id.
+	const timers = [];
 	const context = vm.createContext({
 		document: {getElementById: element, querySelector: () => ({content: 'test'}),
 			addEventListener() {}, createElement: () => ({})},
 		window: {devicePixelRatio: 1, addEventListener() {}},
 		ResizeObserver: class { observe() {} },
 		fetch: async () => ({ok: true, json: async () => config}),
-		setTimeout: () => 1, clearTimeout() {}, URLSearchParams
+		setTimeout: callback => timers.push(callback), clearTimeout() {}, URLSearchParams,
+		performance: {now: () => 0}, ImageData: class { constructor(data, width, height) { Object.assign(this, {data, width, height}); } },
+		createImageBitmap: async image => ({width: image.width, height: image.height, close() {}})
 	});
 	vm.runInContext(fs.readFileSync(path.join(__dirname, 'viewer.js'), 'utf8'), context);
 	await new Promise(setImmediate);
 	const runtime = vm.runInContext('({state, selectPlane, updateControls, viewRequest, setGenerating, doOpen, ' +
-		'matchingPlane, analyseMessage, analyseTables, updateAnalyseButton})', context);
+		'matchingPlane, analyseMessage, analyseTables, updateAnalyseButton, changed, haloRequest, needsRender, pump})', context);
 	const planes = [
 		{index: 0, channel: 'G', z: 9, mpp: 1, x: 0, y: 0, width: 1000, height: 1000},
 		{index: 1, channel: 'DAPI', z: 2, mpp: 1, x: 0, y: 0, width: 1000, height: 1000},
@@ -54,7 +59,7 @@ async function viewer(dicom = true) {
 	Object.assign(runtime.state, {image: {planes}, busy: true, generation: 7});
 	element('plane').value = '2';
 	runtime.selectPlane();
-	return {...runtime, element, context};
+	return {...runtime, element, context, timers};
 }
 
 test('test_viewer_z_slider_uses_sorted_positions_in_current_channel', async () => {
@@ -160,6 +165,33 @@ test('test_viewer_generate_dicom_filters_codecs_and_changes_extension', async ()
 	assert.deepEqual(element('generate-codec').children.map(option => option.value), [1, 4]);
 });
 
+test('test_viewer_generate_untiled_tile_zero_writes_tif', async () => {
+	const {element} = await viewer();
+	assert.equal(element('generate-tile').min, 0);
+	element('generate-name').value = 'cells.ptf';
+	element('generate-tile').value = '48';
+	element('generate-tile').listeners.change();
+	assert.equal(Number(element('generate-tile').value), 0);
+	assert.equal(element('generate-name').value, 'cells.tif');
+	assert.deepEqual(element('generate-codec').children.map(option => option.value), [1, 6]);
+	assert.equal(Number(element('generate-z').value), 1);
+	assert.equal(element('generate-z').disabled, true);
+	assert.equal(element('generate-dicom').disabled, true);
+	assert.equal(element('generate-width').max, 16384);
+	element('generate-codec').value = '6';
+	element('generate-codec').listeners.change();
+	assert.equal(element('generate-lossless').checked, true);
+	assert.equal(element('generate-lossless').disabled, true);
+	assert.equal(element('generate-quality').disabled, true);
+	element('generate-tile').value = '16';
+	element('generate-tile').listeners.change();
+	assert.equal(Number(element('generate-tile').value), 64);
+	assert.equal(element('generate-name').value, 'cells.ptf');
+	assert.deepEqual(element('generate-codec').children.map(option => option.value), [1, 4]);
+	assert.equal(element('generate-z').disabled, false);
+	assert.equal(element('generate-dicom').disabled, false);
+});
+
 test('test_viewer_generate_dicom_disabled_without_dicom_writer', async () => {
 	const {element} = await viewer(false);
 	assert.equal(element('generate-dicom').disabled, true);
@@ -249,4 +281,116 @@ test('test_viewer_analyse_reload_preserves_view_and_plane', async () => {
 	assert.deepEqual([state.x, state.y, state.mpp], [300, 400, 0.5]);
 	assert.equal(state.openOptions.path, 'slide.dcm');
 	assert.equal(state.generation, 9);
+});
+
+// Fires the render timer armed by the last navigation; null when none is armed.
+function fireRender(timers) {
+	const callback = timers.pop();
+	timers.length = 0;
+	callback?.();
+	return callback ?? null;
+}
+
+test('test_viewer_halo_request_extends_view_by_fraction', async () => {
+	const {state, viewRequest, haloRequest} = await viewer();
+	const view = viewRequest();
+// 640 x 480 raster: a 128-pixel band on every side.
+	const band = 128 * view.mpp;
+	const halo = haloRequest(view);
+	assert.equal(halo.x, view.x - band);
+	assert.equal(halo.y, view.y - band);
+	assert.equal(halo.width, view.width + 2 * band);
+	assert.equal(halo.height, view.height + 2 * band);
+	assert.equal(halo.mpp, view.mpp);
+	assert.equal(halo.plane, state.plane.index);
+});
+
+test('test_viewer_halo_capped_at_max_edge', async () => {
+	const {haloRequest} = await viewer();
+	const halo = haloRequest({plane: 2, x: 0, y: 0, width: 4000, height: 1000, mpp: 1});
+	assert.deepEqual([halo.x, halo.y, halo.width, halo.height], [-48, -800, 4096, 2600]);
+});
+
+test('test_viewer_pan_within_half_halo_sends_no_render', async () => {
+	const {state, timers, changed, viewRequest} = await viewer();
+	assert.ok(fireRender(timers));
+	const sent = state.pendingRender;
+	assert.equal(sent, state.inflight);
+	assert.ok(sent.width > viewRequest().width);
+	state.x += 128 * state.mpp * 0.4;
+	changed();
+	assert.equal(timers.length, 0);
+	assert.equal(state.pendingRender, sent);
+});
+
+test('test_viewer_pan_past_half_halo_requests_halo_render', async () => {
+	const {state, timers, changed, viewRequest, haloRequest} = await viewer();
+	fireRender(timers);
+	const sent = state.pendingRender;
+	state.x += 128 * state.mpp * 0.6;
+	changed();
+// Further motion neither postpones nor duplicates the armed render.
+	state.x += 1;
+	changed();
+	assert.equal(timers.length, 1);
+	fireRender(timers);
+	assert.notEqual(state.pendingRender, sent);
+	assert.deepEqual({...state.pendingRender}, {...haloRequest(viewRequest())});
+});
+
+test('test_viewer_stale_server_frame_is_still_shown', async () => {
+	const {state, timers, context, changed, pump} = await viewer();
+	fireRender(timers);
+	const sent = state.pendingRender;
+	state.x += 10 * state.mpp;
+	changed();
+	const width = Math.ceil(sent.width / sent.mpp);
+	const height = Math.ceil(sent.height / sent.mpp);
+	const headers = {'X-Pyra-Width': String(width), 'X-Pyra-Height': String(height), 'X-Pyra-Render-Ms': '1',
+		'X-Pyra-Incomplete': '0'};
+	context.fetch = async () => ({ok: true, headers: {get: name => headers[name] ?? null},
+		arrayBuffer: async () => new ArrayBuffer(width * height * 4)});
+	state.pendingOverview = null;
+	state.busy = false;
+	await pump();
+	assert.equal(state.frame.request, sent);
+	assert.equal(state.frame.complete, true);
+});
+
+test('test_viewer_halo_default_comes_from_server', async () => {
+	const {state, element} = await viewer();
+	assert.equal(state.halo, 20);
+	assert.equal(element('halo').value, 20);
+	assert.equal(element('halo').max, 50);
+});
+
+test('test_viewer_halo_field_sets_band_and_rerenders', async () => {
+	const {state, timers, element, viewRequest} = await viewer();
+	fireRender(timers);
+	element('halo').value = '10';
+	element('halo').listeners.change();
+	assert.equal(state.halo, 10);
+	assert.ok(fireRender(timers), 'A new halo did not re-render the served view');
+	const view = viewRequest();
+// 10% of a 640-pixel raster: a 64-pixel band.
+	assert.equal(state.pendingRender.width, view.width + 2 * 64 * view.mpp);
+	assert.equal(state.pendingRender.halo, 10);
+});
+
+test('test_viewer_halo_zero_renders_exact_view', async () => {
+	const {state, timers, element, viewRequest} = await viewer();
+	element('halo').value = '0';
+	element('halo').listeners.change();
+	fireRender(timers);
+	const view = viewRequest();
+	assert.deepEqual([state.pendingRender.x, state.pendingRender.y, state.pendingRender.width, state.pendingRender.height],
+		[view.x, view.y, view.width, view.height]);
+});
+
+test('test_viewer_halo_field_clamped_to_server_limit', async () => {
+	const {state, element} = await viewer();
+	element('halo').value = '80';
+	element('halo').listeners.change();
+	assert.equal(state.halo, 50);
+	assert.equal(element('halo').value, 50);
 });

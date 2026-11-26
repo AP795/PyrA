@@ -54,6 +54,8 @@ if(EMSCRIPTEN)
 # (Deps/), is built for threads.
 	add_compile_options(-pthread)
 	add_link_options(-pthread)
+# WebAssembly SIMD, as in Deps/: a browser without it falls back to server rendering.
+	add_compile_options(-msimd128)
 endif()
 if(PYRA_LINUX_SDK)
 	include(cmake/PyraLinuxSdk.cmake)
@@ -135,6 +137,7 @@ set(PYR_SOURCES
 	img_codec.cpp
 	img_czi.cpp
 	img_htj2k.cpp
+	img_jxr.cpp
 	img_tiff.cpp
 	ipx_imd.cpp
 	ipx_layout.cpp
@@ -169,6 +172,7 @@ set(PYR_HEADERS
 	img_czi.h
 	img_htj2k.h
 	img_htj2k_quantization.h
+	img_jxr.h
 	img_tiff.h
 	ipx_imd.h
 	ipx_layout.h
@@ -319,6 +323,9 @@ if(PYRA_WINDOWS_SDK OR PYRA_LINUX_SDK)
 	if(PYR_WITH_DCMTK)
 		list(APPEND pyra_bundled_notices dcmtk)
 	endif()
+	if(PYR_WITH_JXL)
+		list(APPEND pyra_bundled_notices libjxl highway brotli skcms)
+	endif()
 	pyra_install_dependency_notices("${pyra_notice_destination}" ${pyra_bundled_notices})
 endif()
 # An Emscripten build makes only the browser client: there is no shared library to export.
@@ -347,7 +354,8 @@ if(BUILD_TESTING)
 	target_link_libraries(pyra_decode_pool_test PRIVATE pyra_core)
 	add_test(NAME pyra_decode_pool COMMAND pyra_decode_pool_test)
 	set_tests_properties(pyra_decode_pool PROPERTIES TIMEOUT 20)
-	add_executable(pyra_standalone_test Tests/standalone_test.cpp Tests/wsi_buffers_test.cpp Tests/ptf_subset_test.cpp)
+	add_executable(pyra_standalone_test Tests/standalone_test.cpp Tests/wsi_buffers_test.cpp Tests/ptf_subset_test.cpp
+		Tests/img_jxr_test.cpp)
 	target_link_libraries(pyra_standalone_test PRIVATE pyra_core)
 	file(MAKE_DIRECTORY "${PYRA_TEST_OUTPUT_DIRECTORY}")
 	add_test(NAME pyra_standalone COMMAND pyra_standalone_test
@@ -441,10 +449,10 @@ if(PYR_WITH_JXR)
 		"${PYRA_JXR_DIR}/jxrgluelib/*.c")
 	add_library(pyra_jxr STATIC ${PYRA_JXR_SOURCES})
 # jxrlib ships its own guiddef.h, which must not shadow the Windows SDK's in
-# other translation units: only the jxrlib sources and img_czi.cpp see its headers.
+# other translation units: only the jxrlib sources and img_jxr.cpp see its headers.
 	set(PYRA_JXR_INCLUDES "${PYRA_JXR_DIR}/jxrgluelib" "${PYRA_JXR_DIR}/image/sys" "${PYRA_JXR_DIR}/common/include")
 	target_include_directories(pyra_jxr PRIVATE ${PYRA_JXR_INCLUDES} "${PYRA_JXR_DIR}/pyra")
-	set_source_files_properties("${PYRA_CORE_SOURCE_DIR}/img_czi.cpp" TARGET_DIRECTORY pyra_core
+	set_source_files_properties("${PYRA_CORE_SOURCE_DIR}/img_jxr.cpp" TARGET_DIRECTORY pyra_core
 		PROPERTIES INCLUDE_DIRECTORIES "${PYRA_JXR_INCLUDES}")
 	set_target_properties(pyra_jxr PROPERTIES POSITION_INDEPENDENT_CODE ON)
 	if(MSVC)

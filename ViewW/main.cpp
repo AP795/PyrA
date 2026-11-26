@@ -110,13 +110,15 @@ int main ( int argc, char **argv )
 		for (auto i = 1; i < argc; ++i) {
 			const auto argument = std::string( argv[i] );
 			if (argument == "--help") {
-				std::cout << "Usage: pyra_web_test [--root IMAGE_DIRECTORY] [--image RELATIVE_PATH]\n"
+				std::cout << "Usage: PyrA_Web_Viewer [--root IMAGE_DIRECTORY] [--image RELATIVE_PATH]\n"
 					"                     [--port PORT] [--log-dir DIRECTORY]\n"
 					"                     [--scripts DIR] [--bridge-cli PATH] [--bridge-worker PATH] [--python PATH]\n"
-					"                     [--public-origin https://HOST[:PORT]]\n"
+					"                     [--public-origin https://HOST[:PORT]] [--view-halo PERCENT]\n"
 					"Analyse offers the *.py files of --scripts (default: the bridge's examples).\n"
 					"--public-origin also accepts requests a reverse proxy forwards from that origin.\n"
-					"Open the printed loopback URL in your browser. Ctrl+C stops the server.\n";
+					<< std::format( "--view-halo is the default band rendered around each view, percent of its width "
+						"(0..{}, default {}).\n", pyra::web::kViewHaloMaxPercent, pyra::web::kViewHaloDefaultPercent )
+					<< "Open the printed loopback URL in your browser. Ctrl+C stops the server.\n";
 				return 0;
 			}
 			if (i + 1 == argc) throw std::invalid_argument( "Missing value for " + argument );
@@ -129,6 +131,14 @@ int main ( int argc, char **argv )
 			else if (argument == "--bridge-worker") bridge.bridge_worker = pyra::web::utf8_path( value );
 			else if (argument == "--python") bridge.python = pyra::web::utf8_path( value );
 			else if (argument == "--public-origin") bridge.public_origin = value;
+			else if (argument == "--view-halo") {
+				auto end = size_t{};
+				bridge.view_halo_percent = std::stoi( value, &end );
+				if (end != value.size() || bridge.view_halo_percent < 0 ||
+					bridge.view_halo_percent > pyra::web::kViewHaloMaxPercent)
+					throw std::invalid_argument( std::format( "View halo must be 0..{} percent",
+						pyra::web::kViewHaloMaxPercent ) );
+			}
 			else if (argument == "--port") {
 				auto end = size_t{};
 				port = std::stoi( value, &end );
@@ -148,7 +158,7 @@ int main ( int argc, char **argv )
 			log << message << '\n' << std::flush;
 		};
 		auto server = pyra::web::Server( { root, initial, write_log, bridge.scripts, bridge.bridge_cli,
-			bridge.bridge_worker, bridge.python, bridge.public_origin } );
+			bridge.bridge_worker, bridge.python, bridge.public_origin, bridge.view_halo_percent } );
 		port = server.bind( port );
 		if (port < 0) throw std::runtime_error( "Cannot bind loopback port; use --port 0 to select a free one" );
 		const auto url = std::format( "http://127.0.0.1:{}/", port );

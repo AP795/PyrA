@@ -486,7 +486,7 @@ void test_overview_rejects_missing_plane ( const QString &path )
 void test_prepared_view_coverage_and_limits ()
 {
 	const auto view = pyra::test::RenderRequest{ { 100, 200, 512, 256 }, 0.5, { "G", 0 } };
-	const auto prepared = pyra::test::prepare_view_request( view );
+	const auto prepared = pyra::test::prepare_view_request( view, pyra::test::kViewHaloDefaultPercent );
 	require( prepared.xywh.width() > view.xywh.width() &&
 		pyra::test::view_request_is_covered( prepared, view ), "Prepared image does not cover its initial view" );
 	auto moved = view;
@@ -505,9 +505,83 @@ void test_prepared_view_coverage_and_limits ()
 	require( !pyra::test::view_request_is_covered( prepared, moved ), "Channel change reused another plane" );
 	const auto large = pyra::test::RenderRequest{
 		{ 0, 0, pyra::test::kMaxRenderEdge, pyra::test::kMaxRenderEdge }, 1, {} };
-	const auto bounded = pyra::test::prepare_view_request( large );
+	const auto bounded = pyra::test::prepare_view_request( large, pyra::test::kViewHaloDefaultPercent );
 	require( bounded.xywh.width() <= pyra::test::kMaxRenderEdge &&
 		bounded.xywh.height() <= pyra::test::kMaxRenderEdge, "Prepared image exceeded the raster limit" );
+}
+
+
+// 1024 x 512 raster pixels at 0.5 µm/px: a 205-pixel band, 102.5 µm, on every side.
+const auto kHaloView = pyra::test::RenderRequest{ { 100, 200, 512, 256 }, 0.5, { "G", 0 } };
+constexpr auto kHaloBandUm = 102.5;
+
+
+void test_view_halo_band_is_fraction_of_width ()
+{
+	const auto prepared = pyra::test::prepare_view_request( kHaloView, pyra::test::kViewHaloDefaultPercent );
+	const auto expected = kHaloView.xywh.adjusted( -kHaloBandUm, -kHaloBandUm, kHaloBandUm, kHaloBandUm );
+	require( prepared.xywh == expected, "Halo is not a uniform band of 20% of the view width" );
+}
+
+
+void test_view_refresh_not_needed_when_centred ()
+{
+	const auto prepared = pyra::test::prepare_view_request( kHaloView, pyra::test::kViewHaloDefaultPercent );
+	require( !pyra::test::view_request_needs_refresh( prepared, kHaloView ), "Centred view asked for a refresh" );
+	auto moved = kHaloView;
+	moved.xywh.translate( kHaloBandUm * 0.4, -kHaloBandUm * 0.4 );
+	require( !pyra::test::view_request_needs_refresh( prepared, moved ), "Pan within half the halo asked for a refresh" );
+}
+
+
+void test_view_refresh_needed_past_half_band_while_still_covered ()
+{
+	const auto prepared = pyra::test::prepare_view_request( kHaloView, pyra::test::kViewHaloDefaultPercent );
+	for (const auto offset : { QPointF( kHaloBandUm * 0.6, 0 ), QPointF( 0, -kHaloBandUm * 0.6 ) }) {
+		auto moved = kHaloView;
+		moved.xywh.translate( offset );
+		require( pyra::test::view_request_is_covered( prepared, moved ) &&
+			pyra::test::view_request_needs_refresh( prepared, moved ),
+			"Pan past half the halo did not refresh before the halo edge" );
+	}
+}
+
+
+void test_view_refresh_falls_back_to_coverage_without_halo ()
+{
+	require( !pyra::test::view_request_needs_refresh( kHaloView, kHaloView ), "Exact view asked for a refresh" );
+	auto moved = kHaloView;
+	moved.xywh.translate( 1, 0 );
+	require( pyra::test::view_request_needs_refresh( kHaloView, moved ), "Uncovered view kept the exact image" );
+	moved = kHaloView;
+	moved.mpp *= 2;
+	require( pyra::test::view_request_needs_refresh( kHaloView, moved ), "Zoom kept the old resolution" );
+}
+
+
+void test_view_halo_percent_sets_band ()
+{
+// 10% of 1024 raster pixels: a 103-pixel band, 51.5 µm.
+	const auto smaller = pyra::test::prepare_view_request( kHaloView, 10 );
+	require( smaller.xywh == kHaloView.xywh.adjusted( -51.5, -51.5, 51.5, 51.5 ), "10% halo has the wrong band" );
+	const auto none = pyra::test::prepare_view_request( kHaloView, 0 );
+	require( none == kHaloView && pyra::test::view_request_needs_refresh( none, [] {
+		auto moved = kHaloView;
+		moved.xywh.translate( 1, 0 );
+		return moved;
+	}() ), "0% halo did not render the exact view" );
+	const auto clamped = pyra::test::prepare_view_request( kHaloView, 1000 );
+	require( clamped == pyra::test::prepare_view_request( kHaloView, pyra::test::kViewHaloMaxPercent ),
+		"Halo above the limit was not clamped" );
+}
+
+
+void test_view_halo_capped_at_max_edge ()
+{
+	const auto view = pyra::test::RenderRequest{ { 0, 0, 3900, 1000 }, 1, {} };
+	const auto prepared = pyra::test::prepare_view_request( view, pyra::test::kViewHaloDefaultPercent );
+	require( prepared.xywh.width() == pyra::test::kMaxRenderEdge && prepared.xywh.height() == 1000 + 2 * 780 &&
+		prepared.xywh.center() == view.xywh.center(), "Halo was not capped per axis at the raster limit" );
 }
 
 
@@ -612,6 +686,14 @@ int main ( int argc, char **argv )
 		} );
 		run( "test_timings_empty_and_even_distribution", test_timings_empty_and_even_distribution );
 		run( "test_prepared_view_coverage_and_limits", test_prepared_view_coverage_and_limits );
+		run( "test_view_halo_band_is_fraction_of_width", test_view_halo_band_is_fraction_of_width );
+		run( "test_view_refresh_not_needed_when_centred", test_view_refresh_not_needed_when_centred );
+		run( "test_view_refresh_needed_past_half_band_while_still_covered",
+			test_view_refresh_needed_past_half_band_while_still_covered );
+		run( "test_view_refresh_falls_back_to_coverage_without_halo",
+			test_view_refresh_falls_back_to_coverage_without_halo );
+		run( "test_view_halo_percent_sets_band", test_view_halo_percent_sets_band );
+		run( "test_view_halo_capped_at_max_edge", test_view_halo_capped_at_max_edge );
 		run( "test_packed_display_storage_and_lifetime", [&] { test_packed_display_storage_and_lifetime( path ); } );
 		run( "test_unsupported_compression_error", [&] {
 			test_unsupported_compression_error( QString::fromLocal8Bit( argv[2] ) );

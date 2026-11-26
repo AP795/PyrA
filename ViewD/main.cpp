@@ -46,6 +46,8 @@ int main ( int argc, char **argv )
 		messages = settings->load();
 	}
 	auto window = pyra::test::ViewerWindow( settings ? settings->image_directory() : QString{} );
+	if (settings)
+		window.set_view_halo_percent( settings->view_halo_percent() );
 	window.show();
 	for (const auto &message : messages) {
 		qWarning().noquote() << message;
@@ -56,6 +58,7 @@ int main ( int argc, char **argv )
 	} else {
 		QObject::connect( &application, &QCoreApplication::aboutToQuit, &window, [&] {
 			settings->session_saved( window.session_for_exit() );
+			settings->set_view_halo_percent( window.view_halo_percent() );
 			auto error = QString{};
 			if (!settings->save_status( &error ))
 				qWarning().noquote() << error;

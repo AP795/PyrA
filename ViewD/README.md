@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Test viewer and render evaluator
 
-The optional `pyra_gui_test` application opens slides through PyrA's public C
+The optional `PyrA_Desktop_Viewer` application opens slides through PyrA's public C
 reader interface. All GUI/evaluator sources live here; the library has no Qt
 dependency. The viewer supports mouse dragging, wheel zoom, Fit, 1:1, and
 selection of a channel/Z plane. A vertical slider immediately right of the
@@ -107,7 +107,7 @@ cmake -S . -B out/build/linux-desktop -G Ninja \
   -DPYR_WITH_OPENJPH=ON -DPYR_WITH_DCMTK=ON
 cmake --build out/build/linux-desktop --parallel 2
 ctest --test-dir out/build/linux-desktop --output-on-failure
-out/build/linux-desktop/ViewD/pyra_gui_test
+out/build/linux-desktop/ViewD/PyrA_Desktop_Viewer
 ```
 
 An optional first argument opens an image immediately. Only the loaders enabled
@@ -125,8 +125,12 @@ IPX file-set (`.ipx` with `.imd` records) becomes a gallery the same way.
 
 **Generate…** in either viewer writes a synthetic bright-field IHC z-stack and
 opens it. You set the image size, tile size, pixel size, compression (JPEG,
-JPEG 2000, HTJ2K, JPEG XL; only those this build can encode) and quality or
-lossless. Under **Focus** you set the number of Z levels, the plane step and
+JPEG 2000, HTJ2K, JPEG XL, JPEG XR; only those this build can encode) and
+quality or lossless. Tile size 0 ("None (single image)"; stepping down from
+the smallest tile reaches it) writes a plain untiled `.tif` instead: one focal
+plane (Z levels fixed at 1), at most 16384 pixels per edge, compressed with
+LZW (lossless) or JPEG. It is not opened afterwards; make a gallery of its
+folder to view it in PyrA. Under **Focus** you set the number of Z levels, the plane step and
 where in the stack the tissue is sharp; it blurs increasingly away from there.
 Under **Tissue** you set the tumour nucleus diameter and spacing, and as
 percentages the positive tumour nuclei, the tumour area and the lymphocyte
@@ -139,9 +143,10 @@ share of stromal nuclei. See `pyra_make_synthetic` in
   showed. It refuses an existing name and shows tile progress in the dialog,
   where **Cancel** stops the write.
 - **Command line:** `pyra_make_synthetic out.ptf [--size WxH] [--tile N] [--z N]
-  [--mpp X] [--codec jpeg|jp2k|htj2k|jxl] [--quality 1..100|lossless]
+  [--mpp X] [--codec jpeg|jp2k|htj2k|jxl|jxr|lzw] [--quality 1..100|lossless]
   [--z-step UM] [--focus 0..1] [--nucleus UM] [--spacing UM] [--positive 0..1]
   [--tumour 0..1] [--lymphocytes 0..1]` does the same; fractions are 0..1 here.
+  `--tile 0 --z 1 --codec lzw|jpeg` writes the untiled TIFF (name it `.tif`).
 
 ## Configuration and saved status
 
@@ -259,9 +264,16 @@ either reader, and survive normal application exit/startup through the per-user
 status file. Opening a different slide clears them. Pressing Record starts a
 new workload and clears the report. The viewer writes no recording/configuration sidecars beside
 slide files. The C wrapper uses request-local assembled rasters. The GUI retains
-one prepared display image, extending each view by up to a factor of 1.5 on each
-axis within its existing 4096-pixel edge limit. Panning reuses that image while
-coverage, channel/Z, and mpp match; crossing its edge schedules fresh rendering.
+one prepared display image: the view plus a halo band on every side, capped per
+axis within the existing 4096-pixel edge limit. The toolbar's **Halo** box sets the
+band as a percentage of the view's raster width, 0-50% (default 20%; 0 renders
+only the visible view). A change re-renders the shown image at once, and the value
+is kept in the status file as `view-halo`.
+Panning reuses that image while channel/Z and mpp match. Once the view has used up
+half of the image's actual halo on any side, a fresh image centred on the view is
+rendered, so it normally arrives before the halo's edge comes into view. Without a
+halo (capped, or the exact-view retry below) the image is refreshed when the view
+leaves it.
 Navigation is coalesced without waiting for mouse motion to stop. At most one
 render is active and one latest view is pending. These caller-owned display
 images are outside the C context's tile-cache caps.
@@ -296,7 +308,7 @@ thumbnail calls do not enter recordings or replay.
 To test the actual WSLg window with the same automated workflow:
 
 ```sh
-QT_QPA_PLATFORM=xcb out/build/linux-desktop/ViewD/pyra_gui_test --smoke-test \
+QT_QPA_PLATFORM=xcb out/build/linux-desktop/ViewD/PyrA_Desktop_Viewer --smoke-test \
   out/build/linux-desktop/test_out/ViewD/wslg
 ```
 

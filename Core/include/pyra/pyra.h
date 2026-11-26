@@ -213,7 +213,11 @@ enum {
 	PYRA_CODEC_JPEG = 1,
 	PYRA_CODEC_JPEG2000 = 2,
 	PYRA_CODEC_HTJ2K = 3,
-	PYRA_CODEC_JPEGXL = 4
+	PYRA_CODEC_JPEGXL = 4,
+	// PTF only (TIFF compression 22610, as Bio-Formats reads it); not in DICOM.
+	PYRA_CODEC_JPEGXR = 5,
+	// Untiled TIFF only (tile_edge 0): TIFF compression 5, lossless.
+	PYRA_CODEC_LZW = 6
 };
 #define PYRA_QUALITY_LOSSLESS 101u
 
@@ -222,6 +226,8 @@ enum {
 #define PYRA_SYNTHETIC_TILE_MAX 2048u
 #define PYRA_SYNTHETIC_TILE_STEP 16u
 #define PYRA_SYNTHETIC_EDGE_MAX 1048576u
+// tile_edge 0 writes an untiled TIFF, whose edges are capped lower.
+#define PYRA_SYNTHETIC_UNTILED_EDGE_MAX 16384u
 #define PYRA_SYNTHETIC_Z_MAX 16u
 #define PYRA_SYNTHETIC_MPP_MIN 0.05
 #define PYRA_SYNTHETIC_MPP_MAX 10.0
@@ -234,6 +240,9 @@ enum {
 
 // 1 when this build can encode `codec`, 0 otherwise (including unknown values).
 PYRA_API int pyra_codec_can_encode ( pyra_codec codec );
+// 1 when pyra_make_synthetic can write `codec` with this tile edge: 0 (untiled)
+// takes LZW and JPEG, a tiled pyramid the other codecs. Build availability included.
+PYRA_API int pyra_synthetic_can_encode ( pyra_codec codec, uint32_t tile_edge );
 
 // Called after each written tile; return 0 to cancel the write.
 typedef int ( *pyra_progress_fn ) ( void *user, uint64_t done, uint64_t total );
@@ -242,10 +251,12 @@ typedef struct pyra_synthetic_options {
 	uint32_t struct_size;
 	uint32_t width;
 	uint32_t height;
+	// 0 writes an untiled TIFF (see pyra_make_synthetic).
 	uint32_t tile_edge;
 	uint32_t z_levels;
 	pyra_codec codec;
-	// 1..100 lossy; PYRA_QUALITY_LOSSLESS for JPEG 2000, HTJ2K and JPEG XL.
+	// 1..100 lossy; PYRA_QUALITY_LOSSLESS for JPEG 2000, HTJ2K, JPEG XL and JPEG XR.
+	// LZW ignores it.
 	uint32_t quality;
 	uint32_t reserved;
 	double mpp;
@@ -280,6 +291,9 @@ PYRA_API void pyra_synthetic_options_init ( pyra_synthetic_options *options );
 // cancelled or failed write leaves no file. Out-of-range options and codecs this
 // build cannot encode return INVALID_ARGUMENT / UNSUPPORTED naming the field or
 // build option.
+// With tile_edge 0 the output is instead a plain untiled TIFF (name it .tif): the
+// base level of one focal plane (z_levels must be 1), LZW or JPEG strips, edges
+// up to PYRA_SYNTHETIC_UNTILED_EDGE_MAX. PyrA opens it through pyra_make_gallery.
 PYRA_API pyra_status pyra_make_synthetic ( const pyra_synthetic_options *options,
 	const char *path_utf8, pyra_error *error );
 
@@ -287,6 +301,7 @@ PYRA_API pyra_status pyra_make_synthetic ( const pyra_synthetic_options *options
 PYRA_API int pyra_synthetic_dicom_can_encode ( pyra_codec codec );
 // The same tissue and focal planes in a DICOM WSI pyramid. The path names a
 // .dcm entry file and lower resolutions go in a sibling _<stem>_ directory.
+// tile_edge 0 is refused.
 // Existing outputs are refused. The progress callback can also be called
 // between tiles during DICOM metadata writing and publication.
 PYRA_API pyra_status pyra_make_synthetic_dicom ( const pyra_synthetic_options *options,

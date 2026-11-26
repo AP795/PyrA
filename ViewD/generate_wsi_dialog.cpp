@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
@@ -26,6 +27,9 @@ namespace pyra::test {
 namespace {
 
 const auto kDefaultFileName = QStringLiteral( "synthetic_cells.ptf" );
+const auto kPtfSuffix = QStringLiteral( "ptf" );
+const auto kTiffSuffix = QStringLiteral( "tif" );
+constexpr auto kUntiledTile = 0;
 // Fractions are edited as percentages.
 constexpr double kPercent = 100.0;
 
@@ -39,6 +43,8 @@ constexpr CodecChoice kCodecs[] = {
 	{ PYRA_CODEC_JPEG2000, "JPEG 2000" },
 	{ PYRA_CODEC_HTJ2K, "HTJ2K" },
 	{ PYRA_CODEC_JPEGXL, "JPEG XL" },
+	{ PYRA_CODEC_JPEGXR, "JPEG XR" },
+	{ PYRA_CODEC_LZW, "LZW" },
 };
 
 
@@ -90,7 +96,7 @@ GenerateWsiDialog::GenerateWsiDialog ( const QString &directory, QWidget *parent
 	auto *file_row = new QHBoxLayout;
 	path_ = new QLineEdit( QDir( directory ).filePath( kDefaultFileName ), this );
 	path_->setObjectName( QStringLiteral( "synthPath" ) );
-	path_->setAccessibleName( tr( "Output PTF file" ) );
+	path_->setAccessibleName( tr( "Output file" ) );
 	auto *browse = new QPushButton( tr( "Browse…" ), this );
 	browse->setAutoDefault( false );
 	file_row->addWidget( path_, 1 );
@@ -107,11 +113,14 @@ GenerateWsiDialog::GenerateWsiDialog ( const QString &directory, QWidget *parent
 	size_row->addWidget( new QLabel( QStringLiteral( "×" ), this ) );
 	size_row->addWidget( height_, 1 );
 	slide_form->addRow( tr( "&Image size:" ), size_row );
-	tile_ = make_spin( this, QStringLiteral( "synthTile" ), int( PYRA_SYNTHETIC_TILE_MIN ),
+	tile_ = make_spin( this, QStringLiteral( "synthTile" ), kUntiledTile,
 		int( PYRA_SYNTHETIC_TILE_MAX ), int( defaults.tile_edge ) );
+	last_tile_ = tile_->value();
 	tile_->setSingleStep( int( PYRA_SYNTHETIC_TILE_STEP ) );
 	tile_->setSuffix( tr( " px" ) );
-	tile_->setToolTip( tr( "Square tile edge, a multiple of %1" ).arg( PYRA_SYNTHETIC_TILE_STEP ) );
+	tile_->setSpecialValueText( tr( "None (single image)" ) );
+	tile_->setToolTip( tr( "Square tile edge, a multiple of %1 from %2; 0 writes an untiled TIFF "
+		"(one plane, LZW or JPEG)" ).arg( PYRA_SYNTHETIC_TILE_STEP ).arg( PYRA_SYNTHETIC_TILE_MIN ) );
 	slide_form->addRow( tr( "&Tile size:" ), tile_ );
 	mpp_ = make_real( this, QStringLiteral( "synthMpp" ), PYRA_SYNTHETIC_MPP_MIN, PYRA_SYNTHETIC_MPP_MAX,
 		defaults.mpp, 3, tr( " µm/px" ) );
@@ -151,11 +160,6 @@ GenerateWsiDialog::GenerateWsiDialog ( const QString &directory, QWidget *parent
 
 	codec_ = new QComboBox( this );
 	codec_->setObjectName( QStringLiteral( "synthCodec" ) );
-	for (const auto &codec : kCodecs) {
-		if (pyra_codec_can_encode( codec.value ))
-			codec_->addItem( QString::fromUtf8( codec.label ), uint32_t( codec.value ) );
-	}
-	codec_->setCurrentIndex( std::max( 0, codec_->findData( defaults.codec ) ) );
 	slide_form->addRow( tr( "&Compression:" ), codec_ );
 	quality_ = make_spin( this, QStringLiteral( "synthQuality" ), 1, 100, int( defaults.quality ) );
 	lossless_ = new QCheckBox( tr( "&Lossless" ), this );
@@ -177,16 +181,19 @@ GenerateWsiDialog::GenerateWsiDialog ( const QString &directory, QWidget *parent
 	};
 	connect( path_, &QLineEdit::textChanged, this, enable_ok );
 	connect( codec_, &QComboBox::currentIndexChanged, this, [this] { update_quality(); } );
+	connect( tile_, &QSpinBox::valueChanged, this, [this] ( int value ) { tile_changed( value ); } );
 	connect( lossless_, &QCheckBox::toggled, this, [this] { update_quality(); } );
 	connect( buttons, &QDialogButtonBox::accepted, this, &QDialog::accept );
 	connect( buttons, &QDialogButtonBox::rejected, this, &QDialog::reject );
 	connect( browse, &QPushButton::clicked, this, [this] {
 		const auto selected = QFileDialog::getSaveFileName( this, tr( "Save synthetic WSI" ),
-			path_->text(), tr( "PTF slides (*.ptf)" ) );
+			path_->text(), untiled() ? tr( "TIFF images (*.tif *.tiff)" ) : tr( "PTF slides (*.ptf)" ) );
 		if (!selected.isEmpty())
 			path_->setText( selected );
 	} );
 	enable_ok();
+	update_layout();
+	codec_->setCurrentIndex( std::max( 0, codec_->findData( defaults.codec ) ) );
 	update_quality();
 }
 
@@ -194,6 +201,12 @@ GenerateWsiDialog::GenerateWsiDialog ( const QString &directory, QWidget *parent
 QString GenerateWsiDialog::path () const
 {
 	return path_->text().trimmed();
+}
+
+
+bool GenerateWsiDialog::untiled () const
+{
+	return tile_->value() == kUntiledTile;
 }
 
 
@@ -220,12 +233,74 @@ pyra_synthetic_options GenerateWsiDialog::options () const
 }
 
 
-// JPEG has no lossless mode; a lossless choice makes quality meaningless.
+// Tile edges below the minimum other than 0 do not exist: stepping down from the
+// minimum lands on 0 (untiled), stepping up from 0 on the minimum. The snapping
+// setValue comes back here with the snapped value.
+void GenerateWsiDialog::tile_changed ( int value )
+{
+	const auto minimum = int( PYRA_SYNTHETIC_TILE_MIN );
+	if (value > kUntiledTile && value < minimum) {
+		tile_->setValue( value > last_tile_ ? minimum : kUntiledTile );
+		return;
+	}
+	const auto was_untiled = last_tile_ == kUntiledTile;
+	last_tile_ = value;
+	if (untiled() != was_untiled)
+		update_layout();
+}
+
+
+// An untiled image is one plane, smaller, compressed differently and a .tif.
+void GenerateWsiDialog::update_layout ()
+{
+	const auto flat = untiled();
+	if (flat)
+		z_levels_->setValue( 1 );
+	z_levels_->setEnabled( !flat );
+	const auto edge_max = int( flat ? PYRA_SYNTHETIC_UNTILED_EDGE_MAX : PYRA_SYNTHETIC_EDGE_MAX );
+	width_->setMaximum( edge_max );
+	height_->setMaximum( edge_max );
+	update_codecs();
+	const auto text = path_->text().trimmed();
+	const auto dot = text.lastIndexOf( u'.' );
+	const auto suffix = dot < 0 ? QString{} : text.mid( dot + 1 ).toLower();
+	const auto wanted = flat ? kTiffSuffix : kPtfSuffix;
+	const auto known = suffix == kPtfSuffix || suffix == kTiffSuffix || suffix == QStringLiteral( "tiff" );
+	if (known && suffix != wanted && !( flat && suffix == QStringLiteral( "tiff" ) ))
+		path_->setText( text.left( dot + 1 ) + wanted );
+}
+
+
+// The codecs this build writes for the current layout; keeps the selection when
+// it is still offered.
+void GenerateWsiDialog::update_codecs ()
+{
+	const auto current = codec_->currentData();
+	{
+		const auto blocker = QSignalBlocker( codec_ );
+		codec_->clear();
+		for (const auto &codec : kCodecs) {
+			if (pyra_synthetic_can_encode( codec.value, uint32_t( tile_->value() ) ))
+				codec_->addItem( QString::fromUtf8( codec.label ), uint32_t( codec.value ) );
+		}
+		const auto keep = current.isValid() ? codec_->findData( current ) : -1;
+		codec_->setCurrentIndex( std::max( 0, keep >= 0 ? keep : codec_->findData( PYRA_CODEC_JPEG ) ) );
+	}
+	update_quality();
+}
+
+
+// JPEG has no lossless mode; a lossless choice makes quality meaningless. LZW is
+// lossless only.
 void GenerateWsiDialog::update_quality ()
 {
-	const auto can_lossless = codec_->currentData().toUInt() != PYRA_CODEC_JPEG;
+	const auto codec = codec_->currentData().toUInt();
+	const auto lzw = codec == PYRA_CODEC_LZW;
+	const auto can_lossless = codec != PYRA_CODEC_JPEG && !lzw;
+	if (lzw)
+		lossless_->setChecked( true );
 	lossless_->setEnabled( can_lossless );
-	quality_->setEnabled( !( can_lossless && lossless_->isChecked() ) );
+	quality_->setEnabled( !lzw && !( can_lossless && lossless_->isChecked() ) );
 }
 
 } // namespace pyra::test

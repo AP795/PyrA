@@ -17,11 +17,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
 	add_compile_options(-fwasm-exceptions)
 # The client decodes on threads: its objects must all use shared memory.
 	add_compile_options(-pthread)
+# WebAssembly SIMD (every current browser): Highway, OpenJPH and the compiler's
+# autovectorizer use it; a browser without it falls back to server rendering.
+	add_compile_options(-msimd128)
 elseif(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
 	message(FATAL_ERROR "This dependency adapter requires 64-bit Linux or Emscripten.")
 endif()
 set(PYRA_DEPENDENCY_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 option(PYRA_DEPENDENCY_ZLIB "Build bundled zlib for TIFF Deflate/PixarLog" ON)
+option(PYRA_DEPENDENCY_JXL "Build bundled libjxl for JPEG XL (PYR_WITH_JXL)" ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_C_STANDARD 99)
 find_package(Threads REQUIRED)
@@ -131,6 +135,18 @@ set(OJPH_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(OJPH_ENABLE_TIFF_SUPPORT OFF CACHE BOOL "" FORCE)
 add_subdirectory("${PYRA_DEPENDENCY_SOURCE_DIR}/OpenJPH" "${CMAKE_CURRENT_BINARY_DIR}/openjph")
 
+# libjxl's own build and install rules: include/jxl and the jxl, jxl_cms, hwy and
+# brotli archives land in the SDK prefix, where PyraJxl.cmake finds them.
+if(PYRA_DEPENDENCY_JXL)
+	include(libjxl_options.cmake)
+#	libjxl and Highway compile with -fno-exceptions, which emcc refuses together
+#	with -fwasm-exceptions; they throw nothing, so only that option is dropped.
+	get_property(pyra_jxl_options DIRECTORY PROPERTY COMPILE_OPTIONS)
+	list(REMOVE_ITEM pyra_jxl_options -fwasm-exceptions)
+	set_property(DIRECTORY PROPERTY COMPILE_OPTIONS ${pyra_jxl_options})
+	add_subdirectory("${PYRA_DEPENDENCY_SOURCE_DIR}/libjxl" "${CMAKE_CURRENT_BINARY_DIR}/libjxl")
+endif()
+
 if(NOT PYRA_DEPENDENCY_WASM)
 enable_testing()
 add_executable(pyra_dependency_test dependency_test.cpp)
@@ -148,6 +164,9 @@ if(PYRA_DEPENDENCY_ZLIB)
 	install(TARGETS z ARCHIVE DESTINATION lib)
 	install(FILES "${zlib}/zlib.h" "${zlib}/zconf.h" DESTINATION include)
 	list(APPEND codec_notices zlib)
+endif()
+if(PYRA_DEPENDENCY_JXL)
+	list(APPEND codec_notices libjxl highway brotli skcms)
 endif()
 install(FILES "${jpeg}/src/jpeglib.h" "${jpeg}/src/jmorecfg.h" "${jpeg}/src/jerror.h"
 	"${jpeg}/jconfig.h" "${tiff}/tiff.h" "${tiff}/tiffio.h" "${tiff}/tiffvers.h"

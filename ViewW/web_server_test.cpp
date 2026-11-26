@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -319,6 +320,16 @@ int main ( int argc, char **argv )
 				"&level=0&tile=0", headers );
 			require( response && response->status == 410, "A stale tile request was not 410 Gone" );
 		} );
+		run( "test_web_state_sends_view_halo", [&] {
+			auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
+			options.view_halo_percent = 7;
+			auto halo = RunningServer( std::move( options ) );
+			auto halo_client = httplib::Client( "127.0.0.1", halo.port_ );
+			const auto response = halo_client.Get( "/api/state", { { "X-Pyra-Session", halo.server_.token() } } );
+			require( response && response->status == 200 && response->body.find( std::format(
+				"\"view_halo\":7,\"view_halo_max\":{}", pyra::web::kViewHaloMaxPercent ) ) != std::string::npos,
+				"State does not carry the configured view halo" );
+		} );
 		run( "test_web_public_origin_accepted", [&] {
 			auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
 			options.public_origin = "https://viewer.example.org/";
@@ -367,6 +378,23 @@ int main ( int argc, char **argv )
 			params.emplace( "name", "../escape" );
 			const auto escaped = client.Post( "/api/generate", headers, params );
 			require( escaped && escaped->status == 400, "A path in the file name was accepted" );
+		} );
+		run( "test_web_generate_untiled_image", [&] {
+			const auto root = pyra::web::utf8_path( argv[1] );
+			std::filesystem::remove( root / "web_untiled.tif" );
+			auto params = httplib::Params{ { "path", "" }, { "format", "ptf" }, { "name", "web_untiled.ptf" },
+				{ "width", "300" }, { "height", "200" }, { "tile", "0" }, { "z", "1" }, { "mpp", "0.5" },
+				{ "codec", std::to_string( PYRA_CODEC_LZW ) }, { "quality", "90" }, { "lossless", "1" } };
+			const auto started = client.Post( "/api/generate", headers, params );
+			require( started && started->status == 200, "Untiled generation did not start" );
+			const auto status = wait_for_generation( client, headers );
+			require( status.find( "\"error\":\"\"" ) != std::string::npos &&
+				status.find( "\"path\":\"web_untiled.tif\"" ) != std::string::npos, status.c_str() );
+			require( std::filesystem::is_regular_file( root / "web_untiled.tif" ), "No untiled TIFF was written" );
+			params.erase( "format" );
+			params.emplace( "format", "dicom" );
+			const auto dicom = client.Post( "/api/generate", headers, params );
+			require( dicom && dicom->status == 400, "An untiled DICOM was accepted" );
 		} );
 		run( "test_web_generate_dicom", [&] {
 			const auto output = pyra::web::utf8_path( argv[1] ) / "generated_dicom";

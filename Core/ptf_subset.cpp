@@ -134,7 +134,8 @@ bool plan_subset ( WsiSession &source, const Rtlbr<double> &view,
 			return false;
 		plane.spec.codec = sniff_img_codec( bytes.data(), bytes.size() );
 		if (plane.spec.codec != ImgCodec::Jpeg && plane.spec.codec != ImgCodec::Jp2k &&
-			plane.spec.codec != ImgCodec::Htj2k && plane.spec.codec != ImgCodec::Jxl)
+			plane.spec.codec != ImgCodec::Htj2k && plane.spec.codec != ImgCodec::Jxl &&
+			plane.spec.codec != ImgCodec::JpegXr)
 			return fail( error, "source tile encoding cannot be stored unchanged in PTF" );
 	}
 	return true;

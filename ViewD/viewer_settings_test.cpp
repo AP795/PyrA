@@ -202,6 +202,33 @@ pyra::test::ViewerRecording sample_recording ( const QString &source )
 }
 
 
+void test_viewer_settings_view_halo_round_trip ()
+{
+	auto directory = QTemporaryDir{};
+	auto settings = pyra::test::ViewerSettings( directory.path() );
+	require( settings.load().isEmpty() && settings.view_halo_percent() == pyra::test::kViewHaloDefaultPercent,
+		"First start did not use the default halo" );
+	settings.set_view_halo_percent( 7 );
+	require( settings.save_status(), "Halo status save failed" );
+	auto restarted = pyra::test::ViewerSettings( directory.path() );
+	require( restarted.load().isEmpty() && restarted.view_halo_percent() == 7, "Halo did not survive restart" );
+	restarted.set_view_halo_percent( pyra::test::kViewHaloMaxPercent + 1 );
+	require( restarted.view_halo_percent() == pyra::test::kViewHaloMaxPercent, "Halo above the limit was kept" );
+}
+
+
+void test_viewer_settings_invalid_view_halo_is_reported ()
+{
+	auto directory = QTemporaryDir{};
+	auto settings = pyra::test::ViewerSettings( directory.path() );
+	require( settings.load().isEmpty(), "Setup failed" );
+	write_text( settings.status_path(), "last-image=sample.ptf\nview-halo=-3\n" );
+	const auto errors = settings.load();
+	require( !errors.isEmpty() && errors.join( QLatin1Char( '\n' ) ).contains( settings.status_path() ) &&
+		settings.view_halo_percent() == pyra::test::kViewHaloDefaultPercent, "Invalid halo was not reported" );
+}
+
+
 void test_viewer_settings_recording_round_trip ()
 {
 	auto directory = QTemporaryDir{};
@@ -310,6 +337,8 @@ int main ( int argc, char **argv )
 	run( "test_viewer_settings_malformed_config_is_reported_and_preserved", test_viewer_settings_malformed_config_is_reported_and_preserved );
 	run( "test_viewer_settings_malformed_status_is_reported", test_viewer_settings_malformed_status_is_reported );
 	run( "test_viewer_settings_status_write_failure_has_context", test_viewer_settings_status_write_failure_has_context );
+	run( "test_viewer_settings_view_halo_round_trip", test_viewer_settings_view_halo_round_trip );
+	run( "test_viewer_settings_invalid_view_halo_is_reported", test_viewer_settings_invalid_view_halo_is_reported );
 	run( "test_viewer_settings_recording_round_trip", test_viewer_settings_recording_round_trip );
 	run( "test_viewer_settings_empty_recording_clears_previous_workload", test_viewer_settings_empty_recording_clears_previous_workload );
 	run( "test_viewer_settings_failed_startup_retains_recording", test_viewer_settings_failed_startup_retains_recording );

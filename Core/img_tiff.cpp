@@ -4,14 +4,17 @@
 
 #include "img_tiff.h"
 
+#include "img_jxr.h"
 #include "tiff_inc.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <limits>
 #include <memory>
+#include <system_error>
 #include <vector>
 
 namespace priml {
@@ -249,6 +252,7 @@ bool decode_codec_strip_local ( TIFF *tif, const TiffSampleFormat &format,
 	TIFFGetFieldDefaulted( tif, TIFFTAG_COMPRESSION, &compression );
 	const auto codec = sniff_img_codec( bytes.data(), bytes.size() );
 	const auto matches = compression == COMPRESSION_JXL ? codec == ImgCodec::Jxl
+		: compression == kTiffCompressionJpegXr ? codec == ImgCodec::JpegXr
 		: compression == COMPRESSION_JP2000 && (codec == ImgCodec::Jp2k || codec == ImgCodec::Htj2k);
 	if (!matches)
 		return set_error_local( error, "the strip does not contain the declared codec" );
@@ -458,6 +462,67 @@ bool write_codec_strip_local ( TIFF *tif, const Pwhl<pixeltype> &image,
 	return true;
 }
 
+
+// The tags of an RGB8 strip TIFF, compression included. JPEG goes over YCbCr 4:2:0
+// with libtiff converting from RGB; the compression must be set before its
+// pseudo-tags (quality, colour mode) exist.
+void set_strip_tags_local ( TIFF *tif, const TiffStripSpec &spec )
+{
+	TIFFSetField( tif, TIFFTAG_IMAGEWIDTH, (uint32_t)spec.size.w );
+	TIFFSetField( tif, TIFFTAG_IMAGELENGTH, (uint32_t)spec.size.h );
+	TIFFSetField( tif, TIFFTAG_SAMPLESPERPIXEL, (uint16_t)3 );
+	TIFFSetField( tif, TIFFTAG_BITSPERSAMPLE, (uint16_t)8 );
+	TIFFSetField( tif, TIFFTAG_SAMPLEFORMAT, (uint16_t)SAMPLEFORMAT_UINT );
+	TIFFSetField( tif, TIFFTAG_PLANARCONFIG, (uint16_t)PLANARCONFIG_CONTIG );
+	TIFFSetField( tif, TIFFTAG_ORIENTATION, (uint16_t)ORIENTATION_TOPLEFT );
+	TIFFSetField( tif, TIFFTAG_ROWSPERSTRIP,
+		(uint32_t)std::min( spec.rows_per_strip, spec.size.h ) );
+	if (spec.codec == TiffStripCodec::Jpeg) {
+		TIFFSetField( tif, TIFFTAG_COMPRESSION, (uint16_t)COMPRESSION_JPEG );
+		TIFFSetField( tif, TIFFTAG_PHOTOMETRIC, (uint16_t)PHOTOMETRIC_YCBCR );
+		TIFFSetField( tif, TIFFTAG_YCBCRSUBSAMPLING, (uint16_t)2, (uint16_t)2 );
+		TIFFSetField( tif, TIFFTAG_JPEGQUALITY, spec.quality );
+		TIFFSetField( tif, TIFFTAG_JPEGCOLORMODE, JPEGCOLORMODE_RGB );
+	} else {
+		TIFFSetField( tif, TIFFTAG_COMPRESSION, (uint16_t)COMPRESSION_LZW );
+		TIFFSetField( tif, TIFFTAG_PHOTOMETRIC, (uint16_t)PHOTOMETRIC_RGB );
+		TIFFSetField( tif, TIFFTAG_PREDICTOR, (uint16_t)PREDICTOR_HORIZONTAL );
+	}
+	if (spec.mpp > 0.0) {
+		const auto per_cm = (float)( 10000.0 / spec.mpp );
+		TIFFSetField( tif, TIFFTAG_RESOLUTIONUNIT, (uint16_t)RESUNIT_CENTIMETER );
+		TIFFSetField( tif, TIFFTAG_XRESOLUTION, per_cm );
+		TIFFSetField( tif, TIFFTAG_YRESOLUTION, per_cm );
+	}
+	if (!spec.software.empty())
+		TIFFSetField( tif, TIFFTAG_SOFTWARE, spec.software.c_str() );
+}
+
+
+// One strip buffer, reused: the last strip views its first rows. The encoder
+// (the predictor, the colour conversion) may work in place, which is harmless here
+// because every strip is fetched afresh.
+bool write_strips_local ( TIFF *tif, const TiffStripSpec &spec, const TiffStripFetch &fetch,
+	bool *cancelled, std::string *error )
+{
+	set_strip_tags_local( tif, spec );
+	const auto rows_per_strip = std::min( spec.rows_per_strip, spec.size.h );
+	auto buffer = Pwhl<Rgb>( Dim2D<int>{ spec.size.w, rows_per_strip }, uninit );
+	auto strip = tstrip_t{ 0 };
+	for (auto y = 0; y < spec.size.h; y += rows_per_strip, ++strip) {
+		const auto rows = std::min( rows_per_strip, spec.size.h - y );
+		auto view = Pwhl<Rgb>( Dim2D<int>{ spec.size.w, rows }, spec.size.w, buffer.p );
+		if (!fetch( { { 0, y }, { spec.size.w, y + rows } }, &view )) {
+			*cancelled = true;
+			return set_error_local( error, "cancelled" );
+		}
+		const auto bytes = (tmsize_t)rows * spec.size.w * (tmsize_t)sizeof( Rgb );
+		if (TIFFWriteEncodedStrip( tif, strip, view.p, bytes ) < 0)
+			return set_error_local( error, std::format( "strip {} could not be written", strip ) );
+	}
+	return true;
+}
+
 } // namespace
 
 
@@ -614,6 +679,39 @@ bool tiff_image_write_lossless ( const std::filesystem::path &path,
 	if (!TIFFFlush( tif.get() ))
 		return set_error_local( error, "the file could not be completed" );
 	return true;
+}
+
+
+bool tiff_image_write_strips ( const std::filesystem::path &path, const TiffStripSpec &spec,
+	const TiffStripFetch &fetch, std::string *error )
+{
+	if (spec.size.w <= 0 || spec.size.h <= 0 || spec.rows_per_strip <= 0 || !fetch)
+		return set_error_local( error, "empty image, strip height or fetch" );
+	if (spec.codec == TiffStripCodec::Jpeg) {
+		if (spec.rows_per_strip % kTiffJpegStripRowStep != 0) {
+			return set_error_local( error, std::format( "JPEG strips need a multiple of {} rows",
+				kTiffJpegStripRowStep ) );
+		}
+		if (spec.quality < kImageQualityMin || spec.quality > kImageLossyQualityMax) {
+			return set_error_local( error, std::format( "JPEG quality must be {}..{}",
+				kImageQualityMin, kImageLossyQualityMax ) );
+		}
+	}
+	auto cancelled = false;
+	auto written = false;
+	{
+		auto tif = open_file_local( path, "w" );
+		if (!tif)
+			return set_error_local( error, "the file could not be created" );
+		written = write_strips_local( tif.get(), spec, fetch, &cancelled, error );
+		if (written && !TIFFFlush( tif.get() ))
+			written = set_error_local( error, "the file could not be completed" );
+	}
+	if (!written) {
+		auto ignored = std::error_code{};
+		std::filesystem::remove( path, ignored );
+	}
+	return written;
 }
 
 
