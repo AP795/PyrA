@@ -47,6 +47,12 @@ enum {
 	PYRA_CACHE_PER_LEVEL = 1
 };
 
+// The tile caches pyra_clear_cache empties, combined with |.
+enum {
+	PYRA_CACHE_COMPRESSED = 1,
+	PYRA_CACHE_DECODED = 2
+};
+
 typedef struct pyra_backend_info {
 	uint32_t struct_size;
 	uint32_t available;
@@ -157,10 +163,31 @@ typedef struct pyra_context_stats {
 	uint64_t compressed_cache_misses;
 	uint64_t decoded_cache_hits;
 	uint64_t decoded_cache_misses;
+// Encoded-tile reads (pyra_read_encoded_tile) that found no compressed-cache
+// slot and read the file past the cache; each is also counted as a miss.
+// Non-zero means the compressed budget is too small for the workflow.
+	uint64_t compressed_cache_bypasses;
+// Stored tiles read from the source - the file, or for a remote slide the bytes
+// put into it - whether into the compressed cache or past it. A hit reads
+// nothing; sparse tiles and synthetic levels are not counted.
+	uint64_t source_tile_reads;
+// Bytes of the cache entries holding a tile: what each cache holds, in either
+// topology. A compressed entry is exactly its tile's bytes, and the compressed
+// cache allocates nothing ahead, so compressed_cache_used_bytes equals
+// compressed_cache_bytes. Decoded slots are fixed: decoded_cache_bytes counts
+// the storage allocated, which pools grow many slots at a time and keep.
+	uint64_t compressed_cache_used_bytes;
+	uint64_t decoded_cache_used_bytes;
+// Tiles each cache holds. compressed used_bytes / tiles is the average tile's
+// encoded size; decoded used_bytes / tiles is the decoded slot size.
+	uint64_t compressed_cache_tiles;
+	uint64_t decoded_cache_tiles;
 } pyra_context_stats;
 
 // Occupancy of the open WSI's shared arena or one level's pools. Counts cover
 // allocated slots (including reusable free slots), not maximum budget capacity.
+// A free compressed slot holds no bytes - compressed entries are allocated at
+// their tile's size - so for that cache only the used count measures storage.
 typedef struct pyra_cache_usage {
 	uint32_t struct_size;
 	pyra_cache_topology topology;
@@ -191,6 +218,15 @@ PYRA_API pyra_status pyra_context_get_stats ( pyra_context *context,
 // selected pool. Synthetic levels have no tile cache. OpenSlide is UNSUPPORTED.
 PYRA_API pyra_status pyra_get_cache_usage ( pyra_wsi *wsi, int32_t level_index,
 	pyra_cache_usage *usage, pyra_error *error );
+// Empties the slide's chosen tile caches (PYRA_CACHE_COMPRESSED and/or
+// PYRA_CACHE_DECODED) and frees their storage, as if the slide had just been
+// opened: the next read of a tile misses. Their lookup counters restart at zero
+// (hits, misses, and for the compressed cache bypasses); stored tiles read from
+// the source stay counted. Slides sharing the storage (the same source opened
+// twice in the context) are emptied too. freed_bytes, optional, receives the
+// bytes given back. OpenSlide is UNSUPPORTED.
+PYRA_API pyra_status pyra_clear_cache ( pyra_wsi *wsi, uint32_t caches, uint64_t *freed_bytes,
+	pyra_error *error );
 
 // Paths and returned strings are UTF-8. Opens of the same canonical source in
 // one context share storage. Sources must remain unchanged until all handles close.
@@ -376,7 +412,8 @@ typedef void ( *pyra_bytes_fn )( void *user, const void *data, size_t size );
 
 PYRA_API pyra_status pyra_get_geometry ( pyra_wsi *wsi, pyra_bytes_fn sink,
 	void *user, pyra_error *error );
-// A sparse (absent) tile delivers zero bytes.
+// A sparse (absent) tile delivers zero bytes. A stored tile is read through the
+// compressed cache: copied from its slot when cached, else loaded into one.
 PYRA_API pyra_status pyra_read_encoded_tile ( pyra_wsi *wsi, uint32_t level_index,
 	uint32_t tile_index, pyra_bytes_fn sink, void *user, pyra_error *error );
 PYRA_API pyra_status pyra_open_remote ( pyra_context *context, const void *geometry,

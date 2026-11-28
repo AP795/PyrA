@@ -113,6 +113,8 @@ void test_cache_usage_known_allocations_and_colors ( const QDir &directory )
 	usage.options.compressed_cache_bytes = 100 * pyra::test::kBytesPerMiB;
 	usage.options.decoded_cache_bytes = 200 * pyra::test::kBytesPerMiB;
 	usage.stats = pyra_context_stats{ sizeof( pyra_context_stats ) };
+	usage.stats->compressed_cache_used_bytes = 25 * pyra::test::kBytesPerMiB;
+	usage.stats->compressed_cache_tiles = 25;
 	usage.occupancy = pyra_cache_usage{ sizeof( pyra_cache_usage ) };
 	usage.occupancy->topology = PYRA_CACHE_ARENA;
 	usage.occupancy->compressed_used_slots = 25;
@@ -123,11 +125,12 @@ void test_cache_usage_known_allocations_and_colors ( const QDir &directory )
 	const auto *tbf = widget.findChild<QProgressBar *>( QStringLiteral( "tbfCacheAllocation" ) );
 	const auto *pbf = widget.findChild<QProgressBar *>( QStringLiteral( "pbfCacheAllocation" ) );
 	require( tbf && pbf && tbf->value() * 4 == tbf->maximum() && pbf->value() * 2 == pbf->maximum(),
-		"Cache occupancy fractions differ from occupied/allocated slots" );
-	require( tbf->accessibleDescription().contains( QStringLiteral( "25 / 100 slots used" ) ) &&
+		"TBF bytes/budget or PBF occupied/allocated slots were not the bar fractions" );
+	require( tbf->accessibleDescription().contains( QStringLiteral( "25 tiles in" ) ) &&
+		tbf->accessibleDescription().contains( QStringLiteral( "all levels" ) ) &&
 		pbf->accessibleDescription().contains( QStringLiteral( "100 / 200 slots used" ) ) &&
-		tbf->accessibleDescription().contains( QStringLiteral( "Arena" ) ),
-		"Cache bars omitted slot counts or scope" );
+		pbf->accessibleDescription().contains( QStringLiteral( "Arena" ) ),
+		"Cache bars omitted tiles, slot counts or scope" );
 	widget.resize( 440, widget.sizeHint().height() );
 	widget.show();
 	pump( 10 );
@@ -143,12 +146,15 @@ void test_cache_usage_known_allocations_and_colors ( const QDir &directory )
 	require( blue > 0 && green > 0, "TBF blue and PBF green were not painted" );
 	require( image.save( directory.filePath( QStringLiteral( "images/cache_usage.png" ) ) ),
 		"Cannot save cache usage widget screenshot" );
-// Changing byte budgets must not change the fraction of allocated slots in use.
+// The TBF bar follows the bytes held against the budget; the PBF bar does not
+// change with byte budgets, only with occupied slots.
 	usage.options.compressed_cache_bytes = uint64_t{ 8 } * 1024 * pyra::test::kBytesPerMiB;
-	usage.stats->compressed_cache_bytes = uint64_t{ 6 } * 1024 * pyra::test::kBytesPerMiB;
+	usage.stats->compressed_cache_used_bytes = uint64_t{ 6 } * 1024 * pyra::test::kBytesPerMiB;
+	usage.options.decoded_cache_bytes = uint64_t{ 8 } * 1024 * pyra::test::kBytesPerMiB;
 	widget.set_usage( usage );
-	require( tbf->value() * 4 == tbf->maximum(), "Occupancy changed with the byte allocation/cap" );
-	usage.occupancy->compressed_used_slots = usage.occupancy->compressed_allocated_slots;
+	require( tbf->value() * 4 == 3 * tbf->maximum() && pbf->value() * 2 == pbf->maximum(),
+		"TBF did not follow its bytes, or PBF occupancy changed with the byte budget" );
+	usage.stats->compressed_cache_used_bytes = usage.options.compressed_cache_bytes;
 	usage.occupancy->decoded_used_slots = usage.occupancy->decoded_allocated_slots;
 	widget.set_usage( usage );
 	pump( 10 );
@@ -189,6 +195,7 @@ void test_cache_usage_empty_disabled_and_unavailable ()
 	usage.occupancy = pyra_cache_usage{ sizeof( pyra_cache_usage ) };
 	usage.occupancy->topology = PYRA_CACHE_ARENA;
 	usage.occupancy->compressed_used_slots = usage.occupancy->compressed_allocated_slots = 100;
+	usage.stats->compressed_cache_used_bytes = usage.options.compressed_cache_bytes;
 	widget.set_usage( usage );
 	require( tbf->value() == tbf->maximum() && pbf->value() == 0 &&
 		!pbf->accessibleDescription().contains( QStringLiteral( "unavailable" ) ),
@@ -196,22 +203,27 @@ void test_cache_usage_empty_disabled_and_unavailable ()
 	usage.occupancy->topology = PYRA_CACHE_PER_LEVEL;
 	usage.occupancy->level_index = -1;
 	widget.set_usage( usage );
-	require( tbf->accessibleDescription().contains( QStringLiteral( "awaiting first render" ) ),
-		"Level mode invented a selected pool before any render" );
+	require( pbf->accessibleDescription().contains( QStringLiteral( "awaiting first render" ) ) &&
+		tbf->value() == tbf->maximum(),
+		"Level mode invented a selected pool before any render, or hid the slide's TBF bytes" );
 	usage.occupancy->level_index = 7;
 	usage.occupancy->synthetic_level = 1;
 	widget.set_usage( usage );
-	require( tbf->value() == 0 && tbf->accessibleDescription().contains( QStringLiteral( "Level 7" ) ) &&
-		tbf->accessibleDescription().contains( QStringLiteral( "synthetic level" ) ),
+	require( pbf->value() == 0 && pbf->accessibleDescription().contains( QStringLiteral( "Level 7" ) ) &&
+		pbf->accessibleDescription().contains( QStringLiteral( "synthetic level" ) ),
 		"Synthetic level was shown as an allocated tile cache" );
 	usage.occupancy->synthetic_level = 0;
-	usage.occupancy->compressed_used_slots = 3;
-	usage.occupancy->compressed_allocated_slots = 12;
+	usage.occupancy->decoded_used_slots = 3;
+	usage.occupancy->decoded_allocated_slots = 12;
 	widget.set_usage( usage );
-	require( tbf->value() * 4 == tbf->maximum() &&
-		tbf->accessibleDescription().contains( QStringLiteral( "Level 7" ) ) &&
-		pbf->accessibleDescription().contains( QStringLiteral( "not allocated" ) ),
-		"Selected-level occupancy or unallocated-pool state is incorrect" );
+	require( pbf->value() * 4 == pbf->maximum() &&
+		pbf->accessibleDescription().contains( QStringLiteral( "Level 7" ) ) &&
+		tbf->accessibleDescription().contains( QStringLiteral( "all levels" ) ),
+		"Selected-level occupancy or the slide-wide TBF scope is incorrect" );
+	usage.occupancy->decoded_used_slots = usage.occupancy->decoded_allocated_slots = 0;
+	widget.set_usage( usage );
+	require( pbf->accessibleDescription().contains( QStringLiteral( "not allocated" ) ),
+		"Unallocated PBF pool state is incorrect" );
 }
 
 

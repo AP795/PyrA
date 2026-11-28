@@ -46,9 +46,10 @@ bool serialize_remote_geometry ( const Ppyr &pyramid, std::vector<uint8_t> *out,
 
 
 // The stored bytes of one tile as the client expects them: the loader's
-// self-contained assembled tile, or for a synthetic level the losslessly encoded
+// self-contained assembled tile (read through the compressed cache, see
+// WsiLoader::ReadEncodedTile), or for a synthetic level the losslessly encoded
 // virtual tile. An absent (sparse) tile yields no bytes and true.
-bool read_remote_tile ( WsiLoader &loader, const Ppyr &pyramid, int level_no,
+bool read_remote_tile ( WsiLoader &loader, Ppyr &pyramid, int level_no,
 	int tile_no, std::vector<uint8_t> *bytes, std::string *error = nullptr );
 
 

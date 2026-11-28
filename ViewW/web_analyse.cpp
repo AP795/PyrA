@@ -385,6 +385,13 @@ std::string Analyser::scripts_json () const
 }
 
 
+bool Analyser::running () const
+{
+	auto lock = std::lock_guard( impl_->mutex );
+	return impl_->run.running;
+}
+
+
 bool Analyser::start ( const httplib::Request &request, const std::filesystem::path &slide,
 	const std::string &relative, std::string *body )
 {

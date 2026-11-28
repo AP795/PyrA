@@ -32,7 +32,7 @@ has the Qt viewer's slide, focus and tissue settings; the request sends
 fractions as 0..1 (`z_step`, `focus`, `nucleus`, `spacing`, `positive`,
 `tumour`, `lymphocytes`, each optional with the library default). Generation
 runs in the background. `POST /api/generate` starts it with `format=ptf`
-(the default) or `format=dicom`; `/api/config` lists each codec with
+(the default) or `format=dicom`; `/api/state` lists each codec with
 `tiled`/`untiled` flags. `GET /api/generate`
 reports tile (or strip) progress, and `POST /api/generate-cancel` stops it. One
 generation runs at a time, and an existing file name is refused.
@@ -104,7 +104,7 @@ different output location. See [codec coverage](../Deps/README.md).
 To open a DICOM slide, select one of its `.dcm` files.
 
 To embed the [browser client](#browser-rendering), set `PYRA_WEB_CLIENT_DIR` to
-a folder holding `pyra_client.js` and `pyra_client.wasm`:
+a folder holding `pvue_client.js` and `pvue_client.wasm` (an Emscripten build of `Pvue/wasm`):
 
 ```sh
 PYRA_WEB_CLIENT_DIR=/path/to/client bash ViewW/build_linux.sh
@@ -115,11 +115,16 @@ build of the client (see [Building the client](#building-the-client)).
 
 The default image directory is `tst_in/` in the checkout used to build the
 viewer, independent of its working directory. Set `PYRA_VIEWER_IMAGE_DIRECTORY`
-in CMake to change this default or use `--root IMAGE_DIRECTORY` at launch.
+in CMake to change this default or use `--root IMAGE_DIRECTORY` at launch; a
+directory chosen in the viewer (Change, below) replaces the default until
+another is chosen.
 
 Open the printed URL (normally `http://127.0.0.1:8765/`) in a browser on the
 same machine. `--port 0` selects a free port; `--image relative/path.svs` opens
-an initial image. All assets are embedded, so the executable can start from
+an initial image. Without `--image`, each browser reopens the last image it
+opened, with the same reader and cache options (kept in its `localStorage` on
+every successful open; skipped when the root has changed since, forgotten when
+it no longer opens). All assets are embedded, so the executable can start from
 any working directory. Linux installations use an executable-relative RPATH
 for `libpyra.so`.
 
@@ -134,16 +139,34 @@ ssh -L 8765:127.0.0.1:8765 user@vm
 The standard browser file picker cannot give the server an absolute file
 path. The Open image dialog therefore lists the server's configured image
 directory and accepts relative paths, without uploading or copying slides.
-Symlinks and parent paths resolving outside that root are rejected. This is
-a single-viewer process: tabs share its one active image/context.
+Symlinks and parent paths resolving outside that root are rejected.
+
+**Change**, beside the directory in the Open image dialog, moves the root while
+the server runs: enter an absolute directory and Set (or Enter). Every session
+then browses the new root. The server keeps it for its next start in
+`web-root.txt` in its per-user state folder (`%LOCALAPPDATA%\Pyra` on Windows,
+`$XDG_STATE_HOME/pyra` or `~/.local/state/pyra` on Linux, beside `web-logs`): a
+start without `--root` uses it while it is still a directory, else the default
+above; `--root` always wins, and the startup line says which was used. Only a
+browser on the server's machine sees Change: the
+root is what confines network clients, so `--allow-remote-write` does not let
+them move it, and a request through a proxy is refused. The change waits for a
+slide being generated or analysed. An open slide beneath the new root keeps its
+path; one outside stays shown, but Analyse and reloading need it reopened.
+
+Each
+browser has its own session (a `pyra_sid` cookie) with its own open image, so two
+browsers view different slides; the tabs of one browser share its session. See
+[On a network](#on-a-network) for the session limits.
 
 ## Browser rendering
 
 When the viewer is built with the browser client (below), views are rendered in
 the browser. The server sends each tile as it is stored in the slide, unchanged;
-the browser decodes and renders it with PyrA's own reader, compiled to
-WebAssembly, so the pixels are the server's. The server no longer decodes for
-views, and a revisited area costs no transfer.
+the browser decodes and renders it with PyrA's own reader and Pvue's display rule
+([Pvue/README.md](../Pvue/README.md)), compiled to WebAssembly, so the pixels are
+the server's. The server never decodes for views, and a revisited area costs no
+transfer.
 
 - `GET /api/geometry?generation=N` returns the slide's geometry (levels and tile
   rectangles), from which the browser builds its copy of the slide
@@ -154,14 +177,14 @@ views, and a revisited area costs no transfer.
   levels, which exist only in the server's memory, are sent as losslessly
   encoded 512-pixel tiles. Both URLs name the slide generation and are cached as
   immutable; a stale generation returns 410.
-- A Web Worker (`client_worker.js`) runs the client. For each view it renders
+- A Web Worker (Pvue's `pvue_worker.js`) runs the client. For each view it renders
   what it holds and shows it, fetches the missing tiles (six at a time, a
   browser's connections per host), and renders again until the view is complete.
 - The client keeps 256 MiB in each of its compressed and decoded caches
   (`kClientCacheMiB`). A view whose tiles exceed this cannot complete, so the
   cache must hold one view; uncompressed CZI sub-blocks are the large case.
 - The client decodes on up to 8 threads (`PYRA_CLIENT_MAX_THREADS` in
-  `wasm/CMakeLists.txt`, started with the module), at most the browser's
+  `Pvue/wasm/CMakeLists.txt`, started with the module), at most the browser's
   `navigator.hardwareConcurrency`. Threads share WebAssembly memory, which
   browsers allow only on a cross-origin isolated page: the server sends
   `Cross-Origin-Opener-Policy: same-origin` and
@@ -173,7 +196,79 @@ views, and a revisited area costs no transfer.
   it), the server renders the view and sends it as a lossless HTJ2K RGB frame (`/api/render?encoding=htj2k`,
   header `X-Pyra-Encoding`), which the client decodes. Without the client, or
   before it is ready, the view comes from `/api/render` as raw RGBA, as before.
-  The minimap overview always does.
+- **Colour from channels.** A slide whose channels include R, G and B (named
+  so, any case) gets a first entry in the plane list, "Colour (R, G, B)", selected
+  when the slide opens; the Z slider moves it between focal positions. The
+  server sends the three monochrome channels' tiles as stored, and the browser
+  composes them; the server never composes, so without the client the entry is
+  absent and single planes are shown. Gallery slides list single planes only.
+- **Minimap.** Once the client is ready, it renders the minimap's overview as
+  well, the colour view included, from the coarsest tiles; before that, or
+  without the client, the server renders it.
+- **Server caches.** The server sends stored tiles without decoding or
+  composing, so with the native reader it keeps no decoded-tile cache: PBF is 0
+  (the Settings default; a request without `pbf_mib` gets it too). The TBF
+  default stays, and the tiles sent are read through it: a tile asked again is
+  copied from the cache rather than read from the file. A tile that finds no
+  room is still sent, read past the cache, and counted as bypassed (see the
+  Caches panel). Missing coarse levels are
+  built through it when a slide opens, and a gallery member must fit it. OpenSlide has no stored
+  tiles to send, so the server renders and PBF keeps its default. Where the
+  browser client does not run (plain http on a LAN, the Claude app's browser
+  pane), the server's fallback renders decode afresh for every view: measured on
+  40 pans, 7.5x slower than with a 32 MiB PBF on a JPEG 2000 SVS and 8x on a
+  JPEG one; a larger server PBF can be set in Settings there.
+- **Caches panel.** Above Metadata, the server's and the browser's tile caches
+  (TBF compressed, PBF decoded) show the bytes each has in use of its budget
+  (`Pvue/pvue_cache.h`: the bytes the cache holds for its tiles - a TBF tile
+  at its own encoded size, a PBF tile in a slot of its level's tile size; tiles
+  of levels the server synthesized
+  are held outside the caches and not counted), refreshed
+  every second while a slide is open and the page is visible (`GET /api/cache`,
+  which never waits for a render; the client through `PvueClient.cacheUsage`).
+  After the bytes come the tiles it holds ("448 tiles"), how full it is ("25%
+  full") and its hit ratio
+  over the tile lookups since the image was opened ("99.7% hits", rounded down
+  so a cache that missed never reads 100%; the tooltip gives the counts; absent
+  before the first lookup and for OpenSlide). A TBF is looked up only when the
+  PBF lacks the decoded tile, so a browser TBF with a large PBF shows few
+  lookups. A TBF stores each tile at its own size, so its bytes in use are the
+  tiles' own and the tooltip gives the average tile (on CMU-1 a TBF holds about
+  13 times as many tiles per MiB as when every tile took a slot sized to the
+  largest).
+  A server TBF scores hits only when a tile is asked again, which a running
+  browser client rarely does: its own caches and the HTTP cache serve repeats.
+  "Tiles read from file" is the server's, for the open image; Render
+  timing's "Total sent" counts the stored tiles the server sent for it and their
+  MiB. A tile sent again
+  from the TBF raises the tiles sent and not the tiles read.
+  "off" is a zero budget. A server TBF that had to send tiles past itself adds
+  "· N bypassed", marked: its budget is too small for the workflow, so give the
+  server a larger TBF in Settings. The browser rows say "starting…" until the client
+  runs, "not running" if it failed to start (the status bar gives the reason),
+  and "no browser client" when the build has none.
+  The browser's HTTP cache is not counted.
+- **Settings.** The gear button on the toolbar opens the cache settings: for
+  the server and for the browser client, the TBF and PBF sizes in MiB, the cache
+  type (Arena: one pool per cache for the whole slide; Per level: one pool per
+  level, sized to its tiles) and a reset checkbox per cache. They replace the
+  Open form's former TBF and PBF fields, and this browser remembers them
+  (`pyra.cacheSettings`; a value left at its default stays the default, so the
+  server PBF keeps following the reader: 0 for the native reader, the reader
+  default for OpenSlide). A new size or type reopens the open image (`/api/open`
+  `tbf_mib`, `pbf_mib`, `topology`), keeping the view, with every cache empty.
+  Otherwise the checked caches are reset in place (`POST /api/cache/clear` with
+  `compressed=1` / `decoded=1`, and the client's `clear`; `pyra_clear_cache`):
+  emptied, with their hit counts restarted. A server reset leaves the browser's
+  HTTP cache as it is, so tiles the browser holds are not asked for again.
+  OpenSlide keeps its own cache: only its PBF size applies. The browser column
+  needs a running client; each browser cache is at most `kClientCacheMaxMiB`
+  (768 MiB, so both fit the client's 2 GB memory).
+- **Side panel.** Drag the bar between the image and the panel (or focus it and
+  use the arrow keys) to resize the panel; double-click it for the default
+  360 px. The minimap grows with it. This browser remembers the width
+  (`pyra.sideWidth`); a drag stops at 240 px and at 60% of the window, and a
+  narrower window applies the 60% cap without changing the width remembered.
 
 Measured on this sequence (9 views of 1920x1080; CMU-1 JPEG and JPEG 2000,
 3DHISTECH DICOM, NDPI, two PTF): the client's first pass transfers 1.3-9.4 MiB
@@ -195,66 +290,73 @@ samples: the rounding of float decoders in WebAssembly versus x64 SIMD. On a
 synthetic PTF, the four-view pass that the server fallback answered with
 2.5-2.8 MiB of HTJ2K frames, every time, costs the JPEG XL client 1.7-4.3 MiB of
 stored tiles once and nothing on a repeat; adding JPEG XL grew
-`pyra_client.wasm` from 2.30 to 3.06 MB.
+the client from 2.30 to 3.06 MB.
 
 ### Building the client
 
-The client is a separate Emscripten build of this tree (Windows paths shown;
-any host with emsdk works):
+The client is Pvue's (`Pvue/wasm`), a separate Emscripten build of this tree;
+[Pvue/README.md](../Pvue/README.md#building-the-client) gives the steps. Configure
+the native viewer with `-DPYRA_WEB_CLIENT_DIR=<wasm build>/Pvue/wasm`: the server
+embeds `pvue_client.js` and `pvue_client.wasm` and stays one self-contained
+executable. The pair needs no Emscripten on the viewer's machine: copy both files
+together, with the `third-party/` directory beside them, which holds the notices of
+libjxl and the libraries it bundles; the viewer installs them under
+`share/Pyra/third-party/`. The native build embeds the client but never
+rebuilds it; it warns when an embedded client built from this tree is older than
+its sources ([Pvue/README.md](../Pvue/README.md#building-the-client)).
 
-```powershell
-. C:\c\emsdk\emsdk_env.ps1
-emcmake cmake -G Ninja -S Deps -B ../out/Pyra/build/wasm-deps -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=../out/Pyra/build/wasm-deps/install
-cmake --build ../out/Pyra/build/wasm-deps
-cmake --install ../out/Pyra/build/wasm-deps
-emcmake cmake -G Ninja -S . -B ../out/Pyra/build/wasm -DCMAKE_BUILD_TYPE=Release -DPYRA_LINUX_SDK=../out/Pyra/build/wasm-deps/install -DPYR_WITH_OPENJPH=ON -DPYR_WITH_JXL=ON -DPYR_WITH_DCMTK=OFF -DPYR_WITH_CZI=OFF -DPYRA_WITH_OPENSLIDE=OFF -DPYRA_BUILD_BRIDGE=OFF -DPYRA_BUILD_WEB_TEST=OFF -DPYRA_BUILD_GUI_TEST=OFF -DBUILD_TESTING=OFF -DPYRA_ENABLE_IPO=OFF -DPYRA_ENABLE_AVX2=OFF
-cmake --build ../out/Pyra/build/wasm --target pyra_client
+## On a network
+
+The server listens on `127.0.0.1` only. To reach it from other machines, put a
+TLS reverse proxy such as Caddy in front of it on the same host, and name each
+address the proxy serves with `--public-origin`, once per address, for example
+the host name and the IP address:
+
+```sh
+PyrA_Web_Viewer --root /data/images --port 8765 \
+  --public-origin https://viewer.lan --public-origin https://192.168.1.20
 ```
 
-It was developed with emsdk 4.0.20. The codec SDK includes the bundled libjxl
-0.11.0 (`Deps/libjxl`), so JPEG XL needs no separate step. Every object of the
-client is built with threads (`-pthread`, libjxl's
-`JPEGXL_ENABLE_WASM_THREADS`), as WebAssembly shared memory requires; libjxl
-itself runs single-threaded per tile, the client's pool decoding tiles in
-parallel. For a client without JPEG XL, pass `-DPYRA_DEPENDENCY_JXL=OFF` to the
-SDK and `-DPYR_WITH_JXL=OFF` to the client; its JPEG XL planes are then
-rendered by the server.
+```
+viewer.lan, 192.168.1.20 {
+	tls internal
+	reverse_proxy 127.0.0.1:8765
+}
+```
 
-The SDK and the client are built with WebAssembly SIMD (`-msimd128`), which
-Highway (libjxl), OpenJPH and the compiler's autovectorizer use. Measured
-against the same client without it (median client time of the four-view pass,
-3-5 runs): lossy JPEG XL 191 to 145 ms; lossless JPEG XL 187 to 180 ms, JPEG
-2000 508 to 494 ms, and JPEG XR, JPEG, HTJ2K and NDPI within run-to-run noise;
-`pyra_client.wasm` grows from 3.06 to 3.18 MB. A browser without wasm SIMD
-(Chrome < 91, Firefox < 89, Safari < 16.4) cannot compile the module and gets
-server rendering, like a page that is not cross-origin isolated.
+HTTPS is required, not only advisable: browsers give the decode threads'
+shared memory only to a cross-origin isolated page in a secure context, and a
+plain-http address other than localhost is not one. Such a page still works,
+with every view rendered by the server. The server's COOP/COEP headers pass
+through the proxy unchanged. `tls internal` makes Caddy issue the certificate
+from its own authority, whose root each client must trust (`caddy trust` on the
+proxy host; import the root certificate on other machines and phones). A
+certificate from a public authority needs no client step.
 
-Then configure the native viewer with
-`-DPYRA_WEB_CLIENT_DIR=<wasm build>/ViewW/wasm`: the server embeds
-`pyra_client.js` and `pyra_client.wasm` and stays one self-contained executable.
-The embedding needs only CMake, so the pair can be built once and copied to a
-machine without Emscripten. Copy both files together, since each `.js` loads only
-its own `.wasm`, with the `third-party/` directory beside them: it holds the
-notices of libjxl and the libraries it bundles, which the viewer installs under
-`share/Pyra/third-party/`. Rebuild them after changing what the client contains:
-- the geometry and tile formats (`Core/remote_pyramid.*`, the CZI sub-block
-  descriptor, synthetic-tile encodings);
-- the exports `client_worker.js` calls;
-- decoding or rendering code.
-
-A geometry version mismatch makes the client refuse the slide, and the server
-renders instead.
-`node ViewW/wasm/pyra_client_test.cjs <wasm build>/ViewW/wasm/pyra_client.js
-http://127.0.0.1:PORT SLIDE...` compares the client's renders with a running
-server's.
-
-### Behind a reverse proxy
-
-The server accepts requests only for its loopback address. Behind a proxy such
-as Caddy, pass `--public-origin https://host[:port]`: requests carrying that
-Host and Origin are accepted as well, and the per-run token is still required.
-The content security policy allows WebAssembly (`'wasm-unsafe-eval'`) and
-same-origin workers.
+- **Access key.** With `--public-origin`, the server prints one access URL per
+  origin, `https://viewer.lan/?key=...`, random for each run. A browser opens it
+  once: the key is exchanged for an `pyra_access` cookie (another random value,
+  not the key) and the page loads. A network request without that cookie is
+  refused, page and assets included. Restarting the server invalidates every
+  access cookie.
+- **What counts as local.** A request is local when it names the loopback Host
+  and Origin and carries no `X-Forwarded-For`, `X-Forwarded-Host` or `Forwarded`
+  header. The proxy must add one of them, as Caddy, nginx and IIS ARR do by
+  default, so a proxied request that names the loopback host is refused instead
+  of being taken as local.
+- **Writing.** Network clients may browse, open and view, but not generate,
+  make a gallery or analyse: those requests are refused, and the buttons are
+  disabled with the reason. `--allow-remote-write` lets them. One generation and
+  one analysis run at a time per server, whichever session started it.
+- **Sessions.** Each browser session holds its own reader and caches, sized by
+  its Open dialog, so memory grows with the number of sessions. At most 8 are
+  open (`kMaxSessions` in `web_server.h`). When a new browser arrives at the
+  limit, sessions unused for 30 minutes (`kSessionIdleMinutes`) are closed;
+  if none is, the page answers 503. The session cookie and every API request's
+  page token (`X-Pyra-Session`) must match, and cookies are `HttpOnly`,
+  `SameSite=Strict`, and `Secure` behind an https origin.
+- **Tile URLs** name a generation that is unique across sessions, so a
+  browser's HTTP cache never serves one slide's tiles for another.
 
 ## Rendering and limits
 
@@ -271,7 +373,7 @@ view. Navigation schedules at most one render per 35 ms (`kRenderDelayMs`) and
 does not wait for the motion to stop. At 20% a 16:9 view renders about 2.4 times
 its own pixels, at 10% about 1.6 times.
 The UI retains only the latest pending view and allows one native request at
-a time. The server serializes open/render access, bounds its HTTP worker
+a time. The server serializes open/render access per session, bounds its HTTP worker
 queue, and checks an image generation on each render. The browser discards
 results after plane/image changes; a frame of an earlier view of the same plane
 is still shown, placed by its own rectangle. An interrupted HTTP request cannot
@@ -314,7 +416,7 @@ render timings. Linux defaults to `$XDG_STATE_HOME/pyra/web-logs` or
 Override with `--log-dir DIRECTORY`. Native library stderr remains on the
 launch terminal. Ctrl+C / SIGTERM stop the HTTP service cleanly.
 
-The server restricts Host/Origin, requires a per-run token for API requests,
+The server restricts Host/Origin, requires each session's cookie and page token for API requests,
 and serves only its embedded assets and configured image root. TLS and
 optional cpp-httplib compression SDKs are disabled. The pinned header is
 cpp-httplib 0.36.0 from the uploaded archive, SHA-256

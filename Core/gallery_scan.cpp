@@ -81,9 +81,6 @@ IpxFieldNamer ipx_field_namer_local ()
 // .imd records store it as a rounded float.
 constexpr double kGalleryMppRelativeTolerance = 1e-4;
 
-// Log tag of the shared zone construction for a gallery.
-constexpr std::string_view kGalleryLogTag = "gallery";
-
 
 bool set_error_local ( std::string *error, const std::string &message )
 {

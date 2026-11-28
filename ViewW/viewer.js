@@ -13,10 +13,33 @@ const miniContext = mini.getContext('2d');
 // The toolbar's halo percentage, remembered by this browser; the server's
 // --view-halo (config view_halo, limit view_halo_max) is the default.
 const kHaloStorageKey = 'pyra.viewHalo';
+// The last image this browser opened, with its open options and the root they
+// are relative to; reopened when the page starts (rememberedImage).
+const kImageStorageKey = 'pyra.openedImage';
+// The cache settings this browser chose (Settings dialog): sizes and type of the
+// server's and the browser client's caches.
+const kCacheSettingsKey = 'pyra.cacheSettings';
+// pyra_clear_cache's cache flags (PYRA_CACHE_COMPRESSED, PYRA_CACHE_DECODED).
+const kClearCompressed = 1;
+const kClearDecoded = 2;
+const kCacheSides = ['server', 'browser'];
+const kCacheFields = ['tbf', 'pbf', 'type'];
+// The side panel's width in CSS pixels, dragged on its splitter and remembered
+// by this browser: kSideDefaultPx until then, at least kSideMinPx. A drag stops
+// at kSideMaxShare of the main area, so the image keeps the larger part; the
+// stylesheet applies the same cap (viewer.css main) when the window narrows,
+// without changing the width remembered.
+const kSideStorageKey = 'pyra.sideWidth';
+const kSideDefaultPx = 360;
+const kSideMinPx = 240;
+const kSideMaxShare = 0.6;
+const kSideKeyStepPx = 16;
 // Views are rendered at most this often while navigating, not after it stops.
 const kRenderDelayMs = 35;
+// The plane list's name for a slide's R, G and B channels shown in colour.
+const kColourChannel = 'Colour (R, G, B)';
 const state = {
-	config: null, image: null, plane: null, zPlanes: [], generation: 0, epoch: 0,
+	config: null, image: null, views: [], plane: null, zPlanes: [], preferColour: false, generation: 0, epoch: 0,
 	x: 0, y: 0, mpp: 1, frame: null, inflight: null, overview: null, halo: 0,
 	busy: false, opening: false, generating: false, analysing: false, openOptions: null, notice: null,
 	pendingOpen: null, pendingOverview: null, pendingRender: null,
@@ -33,16 +56,23 @@ function updateControls() {
 
 function isDicom(path) { return /\.dcm$/i.test(path || ''); }
 
+// Network clients write (generate, make a gallery, analyse) only when the server allows it.
+const remoteWriteRefused = 'Writing is disabled for network clients (server option --allow-remote-write)';
+function writable() { return state.config?.remote_write !== false; }
+function connectionLabel() { return state.config?.local === false ? 'Network connection' : 'Local connection'; }
+
 // Enabled for an open DICOM slide when the server can run the bridge; while a
 // run is going it stays enabled so the dialog can be reopened to watch it.
 function updateAnalyseButton() {
 	const analyse = state.config?.analyse;
 	const path = state.openOptions?.path;
-	const ready = Boolean(analyse?.available) && Boolean(state.image) && isDicom(path) && !state.opening;
+	const ready = writable() && Boolean(analyse?.available) && Boolean(state.image) && isDicom(path) && !state.opening;
 	$('analyse').disabled = !ready && !state.analysing;
 	$('analyse').textContent = state.analysing ? 'Analysing…' : 'Analyse…';
-	$('analyse').title = !analyse?.available ? (analyse?.reason || 'Python processing is not available')
+	$('analyse').title = !writable() ? remoteWriteRefused
+		: !analyse?.available ? (analyse?.reason || 'Python processing is not available')
 		: !state.image ? 'Open a DICOM slide first'
+		: !state.openOptions ? 'Reopen this slide from the current image directory'
 		: !isDicom(path) ? 'Analyse works on DICOM slides (.dcm) only'
 		: 'Run Python scripts over the open DICOM slide into a new channel';
 }
@@ -53,7 +83,12 @@ function matchingPlane(planes, previous) {
 }
 
 async function api(path, options = {}) {
-	const response = await fetch(path, {...options, headers: {...options.headers, 'X-Pyra-Session': token}});
+	let response;
+	try {
+		response = await fetch(path, {...options, headers: {...options.headers, 'X-Pyra-Session': token}});
+	} catch (_) {
+		throw new Error('Cannot reach the viewer server: it may have stopped. Start it again and reload this page.');
+	}
 	if (!response.ok) {
 		let message = `Server returned ${response.status}`;
 		try { message = (await response.json()).error || message; } catch (_) { /* Keep HTTP error. */ }
@@ -64,7 +99,7 @@ async function api(path, options = {}) {
 
 function ratio() { return window.devicePixelRatio || 1; }
 function dimensions() { return {width: canvas.width, height: canvas.height}; }
-function selectedPlane() { return state.image?.planes[Number($('plane').value)]; }
+function selectedPlane() { return state.views.find(view => view.key === $('plane').value); }
 
 function updateLabels() {
 	if (!state.plane) return;
@@ -77,7 +112,7 @@ function viewRequest() {
 	const scale = Math.max(1, width / state.config.max_edge, height / state.config.max_edge);
 	return {
 		epoch: state.epoch, generation: state.generation,
-		plane: state.plane.index, x: state.x - width * state.mpp / 2,
+		plane: state.plane.index, display: Boolean(state.plane.display), x: state.x - width * state.mpp / 2,
 		y: state.y - height * state.mpp / 2, width: width * state.mpp,
 		height: height * state.mpp, mpp: state.mpp * scale
 	};
@@ -98,6 +133,72 @@ function setupHalo() {
 	$('halo').value = state.halo;
 }
 
+let sidePx = kSideDefaultPx;
+
+// The side panel's width for `px` asked in a main area `total` wide (Infinity:
+// no cap, the stylesheet's applies).
+function sideWidth(px, total) {
+	const most = Math.max(kSideMinPx, Math.floor(total * kSideMaxShare));
+	return Math.min(Math.max(Math.round(Number(px) || kSideDefaultPx), kSideMinPx), most);
+}
+
+// Sets the panel width (the CSS variable the layout and minimap height use);
+// `save` remembers it, null forgets it and returns to the default. A width
+// restored at page load is not capped by the main area, whose width may not be
+// final yet.
+function setSideWidth(px, save, total = $('main').getBoundingClientRect().width) {
+	const main = $('main');
+	const width = sideWidth(px ?? kSideDefaultPx, total);
+	sidePx = width;
+	main.style?.setProperty('--side-width', `${width}px`);
+	$('splitter').setAttribute('aria-valuenow', String(width));
+	try {
+		if (save === null) globalThis.localStorage?.removeItem(kSideStorageKey);
+		else if (save) globalThis.localStorage?.setItem(kSideStorageKey, String(width));
+	} catch (_) { /* Storage blocked. */ }
+	return width;
+}
+
+// The splitter between the image and the panel: drag it, use the arrow keys, or
+// double-click it to return to the default width.
+function setupSidePanel() {
+	let saved = null;
+	try { saved = globalThis.localStorage?.getItem(kSideStorageKey) ?? null; } catch (_) { /* Storage blocked. */ }
+	setSideWidth(saved == null ? null : Number(saved), false, Infinity);
+	const splitter = $('splitter');
+	let dragging = null;
+// The pointer's distance from the panel's edge where it grabbed the splitter,
+// so the panel does not jump by it.
+	let grab = 0;
+	const widthAt = event => $('main').getBoundingClientRect().right - event.clientX + grab;
+	splitter.addEventListener('pointerdown', event => {
+		grab = 0;
+		grab = sidePx - widthAt(event);	// widthAt adds the previous grab
+		dragging = event.pointerId;
+		splitter.setPointerCapture?.(event.pointerId);
+		splitter.classList.toggle('dragging', true);
+		event.preventDefault();
+	});
+	splitter.addEventListener('pointermove', event => {
+		if (dragging === event.pointerId) setSideWidth(widthAt(event), false);
+	});
+	const stop = event => {
+		if (dragging !== event.pointerId) return;
+		dragging = null;
+		splitter.classList.toggle('dragging', false);
+		setSideWidth(widthAt(event), true);
+	};
+	splitter.addEventListener('pointerup', stop);
+	splitter.addEventListener('pointercancel', stop);
+	splitter.addEventListener('dblclick', () => setSideWidth(null, null));
+	splitter.addEventListener('keydown', event => {
+		const step = {ArrowLeft: kSideKeyStepPx, ArrowRight: -kSideKeyStepPx}[event.key];
+		if (!step) return;
+		setSideWidth(sidePx + step, true);
+		event.preventDefault();
+	});
+}
+
 // A new halo applies at once: frames of another halo no longer serve (servesView).
 function haloChanged() {
 	state.halo = haloPercent($('halo').value);
@@ -106,35 +207,43 @@ function haloChanged() {
 	if (state.plane) changed();
 }
 
-// The view plus its halo band, capped per axis at the raster edge limit.
-function haloRequest(view) {
-	const width = Math.ceil(view.width / view.mpp);
-	const height = Math.ceil(view.height / view.mpp);
-	const band = Math.ceil(width * state.halo / 100);
-	const edge = state.config.max_edge;
-	const bandX = Math.max(0, Math.min(band, Math.floor((edge - width) / 2))) * view.mpp;
-	const bandY = Math.max(0, Math.min(band, Math.floor((edge - height) / 2))) * view.mpp;
-	return {...view, x: view.x - bandX, y: view.y - bandY, width: view.width + 2 * bandX,
-		height: view.height + 2 * bandY, halo: state.halo};
+// Kept on every successful open rather than on page exit, which a browser does
+// not reliably report; blocked storage just means nothing is remembered.
+function rememberImage({path, backend, threads}) {
+	const options = {path, backend, threads};
+	try { globalThis.localStorage?.setItem(kImageStorageKey, JSON.stringify({root: state.config.root, options})); }
+	catch (_) { /* Storage blocked. */ }
 }
 
-// A prepared rectangle of the current halo serves the view until the view has
-// used up half of its actual halo on any side; without a halo, until the view
-// leaves it.
-function servesView(prepared, view) {
-	if (!prepared || prepared.epoch !== view.epoch || prepared.generation !== view.generation ||
-		prepared.plane !== view.plane || prepared.mpp !== view.mpp || prepared.halo !== state.halo) return false;
-	const marginX = Math.max(0, (prepared.width - view.width) / 4);
-	const marginY = Math.max(0, (prepared.height - view.height) / 4);
-	return prepared.x <= view.x - marginX && prepared.y <= view.y - marginY &&
-		prepared.x + prepared.width >= view.x + view.width + marginX &&
-		prepared.y + prepared.height >= view.y + view.height + marginY;
+function forgetImage() {
+	try { globalThis.localStorage?.removeItem(kImageStorageKey); } catch (_) { /* Storage blocked. */ }
 }
+
+// The image to reopen at start: null when none was remembered, it was opened
+// under another root (its path is relative to it), or with OpenSlide where the
+// server now has none.
+function rememberedImage() {
+	let saved = null;
+	try { saved = JSON.parse(globalThis.localStorage?.getItem(kImageStorageKey) ?? 'null'); } catch (_) { return null; }
+	const options = saved?.options;
+	if (saved?.root !== state.config.root || typeof options?.path !== 'string' || !options.path) return null;
+	if (options.backend === '1' && !state.config.openslide) return null;
+	return options;
+}
+
+// Fills the Open form with a remembered image's options and opens it.
+function restoreImage(options) {
+	$('path').value = options.path;
+	for (const key of ['backend', 'threads'])
+		if (options[key] != null) $(key).value = options[key];
+	requestOpen($('backend').value, true);
+}
+
+// The view plus its halo band, capped per axis at the raster edge limit.
+function haloRequest(view) { return Pvue.haloRequest(view, state.halo, state.config.max_edge); }
 
 // The shown complete frame or the request in flight already serves the view.
-function needsRender(view) {
-	return !(state.frame?.complete && servesView(state.frame.request, view)) && !servesView(state.inflight, view);
-}
+function needsRender(view) { return Pvue.needsRender(state.frame, state.inflight, view, state.halo); }
 
 function cancelRenderTimer() {
 	clearTimeout(state.timer);
@@ -152,80 +261,303 @@ function changed() {
 		if (!needsRender(view)) return;
 		const request = haloRequest(view);
 		state.inflight = request;
-		if (clientUsable()) { sendClientView(request); return; }
-		if (clientDecodes()) { sendClientView(request, 'server'); return; }
+		if (client?.usable(request)) { client.send(request); return; }
+		if (client?.decodes(request)) { client.send(request, 'server'); return; }
 		state.pendingRender = request;
 		pump();
 	}, kRenderDelayMs);
 }
 
-// Browser rendering (client_worker.js): the worker holds a WebAssembly copy of
-// PyrA's reader, fetches the stored tiles a view needs and renders it here. The
-// server's /api/render remains the path when the build has no client, before it
-// is ready, and for a plane whose codec the client lacks.
-const client = {worker: null, generation: 0, ready: false, next: 0, shown: 0, failedPlanes: new Set()};
+// Browser rendering (Pvue, pvue_worker.js): the worker holds a WebAssembly copy
+// of PyrA's reader, fetches the stored tiles a view needs and renders it here,
+// composing a slide's R, G and B channels from their own tiles. The server's
+// /api/render remains the path when the build has no client, before it is
+// ready, and for a plane whose codec the client lacks; it renders one plane,
+// never the colour composite.
+let client = null;
 
-function clientUsable() {
-	return client.ready && client.generation === state.generation && Boolean(state.plane) &&
-		!client.failedPlanes.has(state.plane.index);
+// Cache usage, refreshed every kCacheRefreshMs while a slide is open and the page
+// visible: the server's reader (/api/cache) and the browser client's.
+const kCacheRefreshMs = 1000;
+const kBytesPerMiB = 1024 * 1024;
+let cacheRequest = null;
+
+const count = value => Number(value).toLocaleString('en-US');
+const mebibytes = bytes => `${(bytes / kBytesPerMiB).toFixed(1)} MiB`;
+
+function sentText(tiles) {
+	return tiles ? `${count(tiles.served)} tiles · ${mebibytes(tiles.served_bytes)}` : '—';
 }
 
-// The client cannot render this plane but can decode the server's frame of it,
-// which then travels as lossless HTJ2K instead of raw RGBA.
-function clientDecodes() {
-	return client.ready && client.generation === state.generation && Boolean(state.plane);
+// A cache's hit ratio over its tile lookups since the slide was opened, rounded
+// down so that a cache that missed never shows 100%; null without lookups or
+// where the backend does not count them.
+function hitRatio(usage) {
+	const lookups = (usage?.hits ?? 0) + (usage?.misses ?? 0);
+	if (usage?.hits == null || !lookups) return null;
+	return `${(Math.floor(1000 * usage.hits / lookups) / 10).toFixed(1)}% hits`;
+}
+
+function cacheText(usage) {
+	if (!usage) return '—';
+	if (!usage.cap) return 'off';
+	const mib = bytes => (bytes / kBytesPerMiB).toFixed(bytes < 10 * kBytesPerMiB ? 1 : 0);
+	const ratio = hitRatio(usage);
+	const held = usage.held == null ? '' : ` · ${count(usage.held)} tiles`;
+	return `${mib(usage.bytes)} / ${mib(usage.cap)} MiB${held} · ${Math.round(100 * usage.bytes / usage.cap)}% full` +
+		(ratio ? ` · ${ratio}` : '');
+}
+
+// A cache's tooltip: the bytes per tile held and the lookups behind its hit
+// ratio. A compressed tile is stored at its own size, so its figure is the
+// tiles' average; a decoded tile takes a slot of the level's tile size.
+function cacheTitle(usage, compressed) {
+	if (!usage?.cap) return '';
+	const parts = [];
+	if (usage.held > 0) {
+		const kib = (usage.bytes / usage.held / 1024).toFixed(1);
+		parts.push(compressed ? `${count(usage.held)} tiles of ${kib} KiB on average, each stored at its own size.`
+			: `${count(usage.held)} tiles in slots of ${kib} KiB on average, a slot per decoded tile.`);
+	}
+	if (usage.hits != null) parts.push(`${count(usage.hits)} hits, ${count(usage.misses)} misses since the image was opened.`);
+	return parts.join(' ');
+}
+
+// Why the browser rows hold no figures: no client, still starting, or failed.
+function clientCacheReason() {
+	if (!client) return 'no browser client';
+	if (client.startFailed) return 'not running';
+	if (!client.started) return 'starting…';
+	return '—';
+}
+
+// A compressed cache that sent tiles past itself (no slot to load them into)
+// is too small for the workflow: the count is shown, and marked.
+function showCache(owner, usage) {
+	const empty = owner === 'client' && !usage?.compressed ? clientCacheReason() : '—';
+	const compressed = $(`cache-${owner}-compressed`);
+	const bypassed = usage?.compressed?.bypassed || 0;
+	compressed.textContent = usage?.compressed ? cacheText(usage.compressed) + (bypassed ? ` · ${bypassed} bypassed` : '') : empty;
+	compressed.classList.toggle('bypassed', bypassed > 0);
+	compressed.title = [cacheTitle(usage?.compressed, true), bypassed ? `${bypassed} tiles were sent past this cache: ` +
+		'no slot was free to hold them. Open the slide with a larger TBF.' : ''].filter(Boolean).join(' ');
+	const decoded = $(`cache-${owner}-decoded`);
+	decoded.textContent = usage?.decoded ? cacheText(usage.decoded) : empty;
+	decoded.title = cacheTitle(usage?.decoded, false);
+// The server's tile counts for the open image: read from the file, and sent.
+	if (owner === 'server') {
+		$('tiles-read').textContent = usage?.tiles?.read == null ? '—' : count(usage.tiles.read);
+		$('transfer').textContent = sentText(usage?.tiles);
+	}
+}
+
+async function refreshCache() {
+	if (!state.image || cacheRequest || document.hidden) return;
+	cacheRequest = api('/api/cache').then(response => response.json()).then(usage => {
+		if (!usage.busy) showCache('server', usage);
+	}).catch(() => {}).finally(() => { cacheRequest = null; });
+	if (client?.ready) client.cacheUsage();
+	else showCache('client', null);
+	await cacheRequest;
+}
+
+// The server's default decoded-tile cache (PBF) for a reader: none for the native
+// reader, which only sends stored tiles (kServerDecodedCacheMiB); OpenSlide has
+// none to send, so the server renders and keeps the reader's default.
+function defaultPbf(backend) {
+	return backend === '0' ? state.config.server_pbf_mib : state.config.pbf_mib;
+}
+
+// The defaults of each setting; the server's PBF follows the reader.
+function cacheDefaults(backend) {
+	return {server: {tbf: state.config.tbf_mib, pbf: defaultPbf(backend), type: 0},
+		browser: {tbf: state.config.client_tbf_mib, pbf: state.config.client_pbf_mib, type: 0}};
+}
+
+// The settings this browser keeps, {server, browser} each {tbf, pbf, type}: a
+// value, or null for the default (so a default server PBF keeps following the
+// reader).
+function savedCacheSettings() {
+	let saved = null;
+	try { saved = JSON.parse(globalThis.localStorage?.getItem(kCacheSettingsKey) ?? 'null'); } catch (_) { /* Kept none. */ }
+	const side = value => Object.fromEntries(kCacheFields.map(key =>
+		[key, Number.isFinite(value?.[key]) ? value[key] : null]));
+	return {server: side(saved?.server), browser: side(saved?.browser)};
+}
+
+// The server's cache options for an open with `backend`, as /api/open fields.
+// OpenSlide uses only the PBF; the server ignores the others for it.
+function serverCacheOptions(backend, settings = savedCacheSettings()) {
+	const defaults = cacheDefaults(backend).server;
+	const value = key => String(settings.server[key] ?? defaults[key]);
+	return {tbf_mib: value('tbf'), pbf_mib: value('pbf'), topology: value('type')};
+}
+
+// The browser client's cache options (PvueClient's).
+function browserCacheOptions(settings = savedCacheSettings()) {
+	const defaults = cacheDefaults('0').browser;
+	const value = key => settings.browser[key] ?? defaults[key];
+	return {tbfMiB: value('tbf'), pbfMiB: value('pbf'), topology: value('type')};
+}
+
+// The reader of the open image, else the one the Open form would use.
+function currentBackend() {
+	return state.openOptions?.backend ?? $('backend').value;
+}
+
+const settingId = (side, key) => `settings-${side}-${key}`;
+
+// Fills the dialog with the settings in force. Server sizes other than the PBF,
+// its type and its resets are the native reader's; the browser column needs a
+// running client; resets need an open image.
+function openSettings() {
+	const backend = currentBackend();
+	const server = serverCacheOptions(backend);
+	const browser = browserCacheOptions();
+	const shown = {server: {tbf: server.tbf_mib, pbf: server.pbf_mib, type: server.topology},
+		browser: {tbf: browser.tbfMiB, pbf: browser.pbfMiB, type: browser.topology}};
+	const openslide = backend === '1';
+	const clientRuns = Boolean(client) && !client.startFailed;
+	for (const side of kCacheSides) {
+		for (const key of kCacheFields) $(settingId(side, key)).value = String(shown[side][key]);
+		for (const key of ['tbf', 'pbf']) {
+			$(settingId('browser', key)).max = state.config.client_cache_max_mib;
+			const reset = $(settingId(side, `reset-${key}`));
+			reset.checked = false;
+			reset.disabled = !state.image || (side === 'server' ? openslide : !client?.ready);
+		}
+	}
+	for (const id of ['tbf', 'type', 'reset-tbf', 'reset-pbf']) {
+		const field = $(settingId('server', id));
+		if (openslide) field.disabled = true;
+		else if (!id.startsWith('reset')) field.disabled = false;
+		field.title = openslide ? 'OpenSlide keeps its own cache' : '';
+	}
+	for (const key of kCacheFields) {
+		$(settingId('browser', key)).disabled = !clientRuns;
+		$(settingId('browser', key)).title = clientRuns ? '' : clientCacheReason();
+	}
+	$('settings-note').textContent = state.image ? '' : 'No image is open: the settings apply to the next one.';
+	$('settings-error').textContent = '';
+	$('settings-dialog').showModal();
+}
+
+// Keeps the dialog's settings. A new size or type reopens the open image (every
+// cache then starts empty, so resets are moot); otherwise the checked caches are
+// reset in place.
+async function applySettings() {
+	const backend = currentBackend();
+	const before = {server: serverCacheOptions(backend), browser: browserCacheOptions()};
+	const defaults = cacheDefaults(backend);
+	const settings = {};
+	for (const side of kCacheSides) {
+		settings[side] = {};
+		for (const key of kCacheFields) {
+			const value = Number($(settingId(side, key)).value);
+			settings[side][key] = !Number.isFinite(value) || value === defaults[side][key] ? null : value;
+		}
+	}
+	try { globalThis.localStorage?.setItem(kCacheSettingsKey, JSON.stringify(settings)); } catch (_) { /* Storage blocked. */ }
+	const after = {server: serverCacheOptions(backend, settings), browser: browserCacheOptions(settings)};
+	if (client) Object.assign(client.options, after.browser);
+	const flags = side => ($(settingId(side, 'reset-tbf')).checked ? kClearCompressed : 0) |
+		($(settingId(side, 'reset-pbf')).checked ? kClearDecoded : 0);
+	const resets = {server: flags('server'), browser: flags('browser')};
+	$('settings-dialog').close();
+	if (JSON.stringify(before) !== JSON.stringify(after) && state.openOptions) {
+		state.openOptions = {...state.openOptions, ...after.server};
+		reloadImage('Cache settings applied; the image was reopened with empty caches.');
+		return;
+	}
+	try {
+		if (resets.server && state.image) {
+			const fields = {};
+			if (resets.server & kClearCompressed) fields.compressed = '1';
+			if (resets.server & kClearDecoded) fields.decoded = '1';
+			await api('/api/cache/clear', {method: 'POST', body: new URLSearchParams(fields)});
+		}
+		if (resets.browser) client?.clear(resets.browser);
+		if (resets.server || resets.browser) status('Caches reset; their hit counts restart.');
+	} catch (error) { status(`Caches not reset: ${error.message}`); }
+	await refreshCache();
+}
+
+// The client starts with the page, so the Open form knows whether it runs
+// before a slide is opened.
+function makeClient() {
+	if (!state.config?.client || !Pvue.PvueClient.available()) return null;
+	client ??= new Pvue.PvueClient({workerUrl: 'pvue_worker.js', clientUrl: 'pvue_client.js',
+		urls: {geometry: '/api/geometry?generation={generation}',
+			tile: '/api/raw-tile?generation={generation}&level={level}&tile={tile}', render: '/api/render'},
+		headers: {'X-Pyra-Session': token}, ...browserCacheOptions(),
+		threads: navigator.hardwareConcurrency || 1,
+		onOpened: clientOpened, onError: clientError, onFrame: frame => clientFrame(frame).catch(() => {}),
+		onCache: usage => showCache('client', usage), onStarted: () => showCache('client', null),
+		onStartFailed: clientStartFailed, onClearFailed: reason => status(`Browser caches not reset: ${reason}`)});
+	client.start();
+	return client;
+}
+
+function clientStartFailed(reason) {
+	status(`Browser rendering unavailable (${reason}); the server renders instead.`);
+	showCache('client', null);
 }
 
 function startClient() {
-	client.ready = false;
-	client.failedPlanes.clear();
-	if (!state.config?.client || typeof Worker === 'undefined') return;
-	if (!client.worker) {
-		client.worker = new Worker('client_worker.js');
-		client.worker.onmessage = event => clientMessage(event.data);
+	makeClient()?.open(state.generation);
+}
+
+// The client's composites become the first entries of the plane list; the
+// colour view is selected unless the browser chose a plane meanwhile.
+function clientOpened(composites) {
+	if (!state.image) return;
+	const colour = composites.map(composite => {
+		const reference = state.image.planes[composite.reference];
+		return reference && {...reference, key: `display:${composite.reference}`, display: true, channel: kColourChannel};
+	}).filter(Boolean);
+	state.views = [...colour, ...state.image.planes];
+	fillPlaneList();
+	const choice = state.preferColour && (colour.find(view => view.z === state.plane?.z) || colour[0]);
+	state.preferColour = false;
+	$('plane').value = (choice || state.plane)?.key ?? $('plane').value;
+	selectPlane(true);
+}
+
+function clientError(message) {
+	state.inflight = null;
+	if (state.plane?.display && (message.display || message.plane < 0)) {
+		status(`Colour view unavailable (${message.message}); showing the plane.`);
+		$('plane').value = String(state.plane.index);
+		selectPlane(true);
+		return;
 	}
-	client.generation = state.generation;
-	client.worker.postMessage({type: 'open', token, generation: state.generation, cacheMiB: state.config.client_cache_mib,
-		threads: navigator.hardwareConcurrency || 1});
+	status(`Browser rendering unavailable (${message.message}); the server renders instead.`);
+// The minimap's overview is asked again, now of the server, or it stays black.
+	if (message.lane === 'overview' || message.plane < 0) requestOverview();
+	changed();
 }
 
-// `type` 'render' renders in the browser; 'server' fetches the server's frame.
-function sendClientView(request, type = 'render') {
-	request.id = ++client.next;
-	request.started = performance.now();
-	client.worker.postMessage({type, request});
-}
-
-async function clientMessage(message) {
-	if (message.generation !== client.generation) return;
-	if (message.type === 'opened') {
-		client.ready = true;
-		changed();
-	} else if (message.type === 'error') {
-		if (message.plane >= 0) client.failedPlanes.add(message.plane);
-		else client.ready = false;
-		state.inflight = null;
-		status(`Browser rendering unavailable (${message.message}); the server renders instead.`);
-		changed();
-	} else if (message.type === 'frame') {
-		const request = message.request;
+async function clientFrame(message) {
+	const request = message.request;
 // Any frame of this plane newer than the one shown helps: draw() places a frame
 // by its own rectangle, so one from a slightly older view still lands right.
-		if (request.epoch !== state.epoch || request.id < client.shown) return;
-		const bitmap = await createImageBitmap(new ImageData(new Uint8ClampedArray(message.pixels), message.width,
-			message.height), {colorSpaceConversion: 'none'});
-		if (request.epoch !== state.epoch || request.id < client.shown) { bitmap.close(); return; }
-		client.shown = request.id;
-		state.frame?.bitmap.close();
-		state.frame = {bitmap, request, complete: message.complete};
-		draw();
-		$('render-time').textContent = `${message.ms.toFixed(2)} ms (${message.server ? 'server' : 'browser'})`;
-		$('total-time').textContent = `${(performance.now() - request.started).toFixed(2)} ms`;
-		$('transfer').textContent = message.server ? `${(message.bytes / 1048576).toFixed(2)} MiB (HTJ2K frame)`
-			: `${(message.bytes / 1048576).toFixed(2)} MiB in ${message.tiles} tiles`;
-		$('raster').textContent = `${message.width} × ${message.height}`;
-		status(message.complete ? state.notice || 'Ready · Drag to pan, scroll to zoom' : 'Loading tiles…');
+	if (request.epoch !== state.epoch) return;
+	const bitmap = await createImageBitmap(new ImageData(new Uint8ClampedArray(message.pixels), message.width,
+		message.height), {colorSpaceConversion: 'none'});
+	if (request.epoch !== state.epoch || request.id < client.shown[request.lane]) { bitmap.close(); return; }
+	if (request.lane === 'overview') {
+		state.overview?.close();
+		state.overview = bitmap;
+		drawMini();
+		return;
 	}
+	state.frame?.bitmap.close();
+	state.frame = {bitmap, request, complete: message.complete};
+	draw();
+	$('render-time').textContent = `${message.ms.toFixed(2)} ms (${message.server ? 'server' : 'browser'})`;
+	$('total-time').textContent = `${(performance.now() - request.started).toFixed(2)} ms`;
+	$('raster').textContent = `${message.width} × ${message.height}`;
+	status(message.complete ? state.notice || 'Ready · Drag to pan, scroll to zoom' : 'Loading tiles…');
 }
 
 function fit() {
@@ -313,11 +645,11 @@ function resize() {
 }
 
 function updateZSlider() {
-	state.zPlanes = state.image.planes.filter(plane => plane.channel === state.plane.channel)
+	state.zPlanes = state.views.filter(plane => plane.channel === state.plane.channel)
 		.sort((a, b) => a.z - b.z);
 	const slider = $('z-slider');
 	slider.max = state.zPlanes.length - 1;
-	slider.value = state.zPlanes.findIndex(plane => plane.index === state.plane.index);
+	slider.value = state.zPlanes.findIndex(plane => plane.key === state.plane.key);
 	const label = state.plane.z_is_index ? `Z plane ${state.plane.z + 1}` : `Z ${state.plane.z} µm`;
 	$('z-position').textContent = label;
 	slider.setAttribute('aria-valuetext', label);
@@ -332,9 +664,30 @@ function selectPlane(preserveView = false) {
 	state.frame?.bitmap.close();
 	state.overview?.close();
 	state.frame = state.overview = null;
-	state.pendingOverview = {generation: state.generation, plane: state.plane.index, overview: 1, epoch: state.epoch};
+	requestOverview();
 	if (preserveView) changed(); else fit();
 	pump();
+}
+
+// The minimap's overview: rendered by the browser client from the coarsest
+// tiles, the colour composite included; the server renders it otherwise.
+function requestOverview() {
+	const plane = state.plane;
+	const request = {epoch: state.epoch, generation: state.generation, plane: plane.index, display: Boolean(plane.display),
+		x: plane.x, y: plane.y, width: plane.width, height: plane.height,
+		mpp: Math.max(plane.width, plane.height) / state.config.overview_edge};
+	if (client?.usable(request)) client.send(request, 'render', 'overview');
+	else state.pendingOverview = {generation: state.generation, plane: plane.index, overview: 1, epoch: state.epoch};
+}
+
+// The plane list: the colour composites first, then every plane.
+function fillPlaneList() {
+	$('plane').replaceChildren(...state.views.map(plane => {
+		const option = document.createElement('option');
+		option.value = plane.key;
+		option.textContent = `${plane.channel || 'Default'} · ${plane.z_is_index ? `Z plane ${plane.z + 1}` : `Z ${plane.z} µm`}`;
+		return option;
+	}));
 }
 
 async function pixels(request) {
@@ -357,20 +710,22 @@ async function doOpen(task) {
 	const response = await api('/api/open', {method: 'POST', body: new URLSearchParams(task.options)});
 	const image = await response.json();
 	if (task.epoch !== state.epoch) return;
+	for (const plane of image.planes) plane.key = String(plane.index);
+	const previous = state.plane;
 	state.image = image;
+	state.views = [...image.planes];
 	state.generation = image.generation;
 	startClient();
-	$('plane').replaceChildren(...image.planes.map(plane => {
-		const option = document.createElement('option');
-		option.value = plane.index;
-		option.textContent = `${plane.channel || 'Default'} · ${plane.z_is_index ? `Z plane ${plane.z + 1}` : `Z ${plane.z} µm`}`;
-		return option;
-	}));
+	fillPlaneList();
 	const defaultIndex = Number(image.properties.find(([key]) => key === 'pyra.default-plane-index')?.[1] ?? 0);
-	const kept = task.reload ? matchingPlane(image.planes, state.plane) : null;
-	if (kept) $('plane').value = kept.index;
-	else if (image.planes.some(plane => plane.index === defaultIndex)) $('plane').value = defaultIndex;
+	const kept = task.reload ? matchingPlane(image.planes, previous?.display ? image.planes[previous.index] : previous) : null;
+// A first open shows the colour view when the client finds one; a reload keeps
+// the kind of view that was shown.
+	state.preferColour = task.reload ? Boolean(previous?.display) : true;
+	if (kept) $('plane').value = kept.key;
+	else if (image.planes.some(plane => plane.index === defaultIndex)) $('plane').value = String(defaultIndex);
 	state.openOptions = {...task.options};
+	rememberImage(state.openOptions);
 	$('metadata').replaceChildren(...image.properties.map(([key, value]) => {
 		const row = document.createElement('div'); row.className = 'property';
 		const name = document.createElement('div'); name.className = 'property-name'; name.textContent = key;
@@ -411,7 +766,6 @@ async function pump() {
 				draw();
 				$('render-time').textContent = `${frame.nativeMs.toFixed(2)} ms`;
 				$('total-time').textContent = `${(performance.now() - frame.started).toFixed(2)} ms`;
-				$('transfer').textContent = `${(frame.bytes / 1048576).toFixed(2)} MiB`;
 				$('raster').textContent = `${frame.width} × ${frame.height}`;
 				status(frame.incomplete ? 'Incomplete render: unavailable image areas are black.' : state.notice || 'Ready · Drag to pan, scroll to zoom');
 			}
@@ -421,6 +775,8 @@ async function pump() {
 		if (task.epoch === state.epoch) {
 			status(error.message);
 			if (kind === 'open') {
+// A remembered image that no longer opens is not tried at every start.
+				if (task.restored) forgetImage();
 				$('open-error').textContent = error.message;
 				state.opening = false;
 				updateControls();
@@ -430,12 +786,12 @@ async function pump() {
 	} finally {
 		state.busy = false;
 		$('open-submit').disabled = state.opening;
-		$('connection').textContent = 'Local connection';
+		$('connection').textContent = connectionLabel();
 		pump();
 	}
 }
 
-function requestOpen(backend = $('backend').value) {
+function requestOpen(backend = $('backend').value, restored = false) {
 	if (state.opening) return;
 	state.notice = null;
 	state.opening = true;
@@ -443,9 +799,8 @@ function requestOpen(backend = $('backend').value) {
 	state.pendingOverview = state.pendingRender = null;
 	cancelRenderTimer();
 	++state.epoch;
-	state.pendingOpen = {epoch: state.epoch, options: {
-		path: $('path').value, backend, tbf_mib: $('tbf').value,
-		pbf_mib: $('pbf').value, threads: $('threads').value
+	state.pendingOpen = {epoch: state.epoch, restored, options: {
+		path: $('path').value, backend, threads: $('threads').value, ...serverCacheOptions(backend)
 	}};
 	$('open-error').textContent = '';
 	$('open-submit').disabled = true;
@@ -492,7 +847,10 @@ async function showFolder(folder) {
 			return button;
 		}));
 		if (listing.truncated) $('open-error').textContent = 'Showing the first 512 entries. You can also enter a relative path.';
-	} catch (error) { $('open-error').textContent = error.message; }
+	} catch (error) {
+		$('open-error').textContent = error.message;
+		$('open-error').scrollIntoView?.({block: 'nearest'});
+	}
 }
 
 function showOpen() {
@@ -504,8 +862,52 @@ function showOpen() {
 
 for (const id of ['browse', 'welcome-open']) $(id).addEventListener('click', showOpen);
 for (const id of ['close-dialog', 'cancel-dialog']) $(id).addEventListener('click', () => $('open-dialog').close());
+$('settings').addEventListener('click', openSettings);
+for (const id of ['settings-close', 'settings-cancel']) $(id).addEventListener('click', () => $('settings-dialog').close());
+$('settings-form').addEventListener('submit', event => { event.preventDefault(); applySettings(); });
 $('open-form').addEventListener('submit', event => { event.preventDefault(); requestOpen(); });
 $('parent-folder').addEventListener('click', () => showFolder(state.folder.split('/').slice(0, -1).join('/')));
+
+// The server's image directory. A browser on this machine may move it for every
+// session; the server keeps it for its next start without --root. Network
+// clients may not, since it is what confines them. An open slide beneath the new
+// directory keeps its path; one outside stays shown but cannot be reloaded.
+function showRootEditor(show) {
+	$('root-editor').hidden = !show;
+	$('change-root').hidden = show || state.config?.local !== true;
+	if (show) { $('root-input').value = state.config.root; $('root-input').focus?.(); }
+}
+
+async function setRoot() {
+	$('open-error').textContent = '';
+	try {
+		const changed = await (await api(`/api/root?${new URLSearchParams({path: $('root-input').value.trim()})}`,
+			{method: 'POST'})).json();
+		state.config.root = changed.root;
+		$('root-label').textContent = changed.root;
+		if (state.openOptions) {
+			if (changed.slide === null) state.openOptions = null;
+			else state.openOptions.path = changed.slide;
+		}
+		updateAnalyseButton();
+		showRootEditor(false);
+		$('path').value = '';
+		await showFolder('');
+		if (!changed.saved) $('open-error').textContent = `Changed, but not kept for the next start: ${changed.save_error}`;
+	} catch (error) {
+		$('open-error').textContent = error.message;
+		$('open-error').scrollIntoView?.({block: 'nearest'});
+	}
+}
+
+$('change-root').addEventListener('click', () => showRootEditor(true));
+$('cancel-root').addEventListener('click', () => showRootEditor(false));
+$('set-root').addEventListener('click', setRoot);
+// Enter in the directory field sets it rather than submitting the Open form.
+$('root-input').addEventListener('keydown', event => {
+	if (event.key === 'Enter') { event.preventDefault(); setRoot(); }
+	else if (event.key === 'Escape') { event.preventDefault(); showRootEditor(false); }
+});
 $('make-gallery').addEventListener('click', async () => {
 	$('open-error').textContent = '';
 	try {
@@ -617,7 +1019,7 @@ function setGenerating(generating) {
 	state.generating = generating;
 	for (const id of generateFields) $(id).disabled = generating;
 	$('generate-submit').disabled = generating;
-	$('generate').disabled = generating && !$('generate-dialog').open;
+	$('generate').disabled = !writable() || (generating && !$('generate-dialog').open);
 	if (generating) updateGenerateQuality();
 	else updateGenerateFormat($('generate-codec').value);
 }
@@ -660,7 +1062,7 @@ $('generate-tile').addEventListener('change', snapGenerateTile);
 $('generate-codec').addEventListener('change', updateGenerateQuality);
 $('generate-lossless').addEventListener('change', updateGenerateQuality);
 $('generate-close').addEventListener('click', () => $('generate-dialog').close());
-$('generate-dialog').addEventListener('close', () => { $('generate').disabled = state.generating; });
+$('generate-dialog').addEventListener('close', () => { $('generate').disabled = !writable() || state.generating; });
 $('generate-cancel').addEventListener('click', () => {
 	if (state.generating) api('/api/generate-cancel', {method: 'POST'}).catch(failGenerate);
 	else $('generate-dialog').close();
@@ -845,14 +1247,17 @@ $('analyse-form').addEventListener('submit', async event => {
 		await pollAnalyse();
 	} catch (error) { failAnalyse(error); }
 });
-$('plane').addEventListener('change', () => selectPlane(state.plane?.channel === selectedPlane()?.channel));
+$('plane').addEventListener('change', () => {
+	state.preferColour = false;
+	selectPlane(state.plane?.channel === selectedPlane()?.channel);
+});
 $('z-slider').addEventListener('input', () => {
 	const plane = state.zPlanes[Number($('z-slider').value)];
 	if (!plane || state.opening) return;
-	$('plane').value = plane.index;
+	$('plane').value = plane.key;
 	selectPlane(true);
 });
-$('backend').addEventListener('change', () => { $('tbf').disabled = $('threads').disabled = $('backend').value === '1'; });
+$('backend').addEventListener('change', () => { $('threads').disabled = $('backend').value === '1'; });
 $('fit').addEventListener('click', fit);
 $('halo').addEventListener('change', haloChanged);
 $('native').addEventListener('click', nativeSize);
@@ -925,22 +1330,31 @@ document.addEventListener('keydown', event => {
 new ResizeObserver(resize).observe($('stage'));
 new ResizeObserver(resize).observe(mini);
 window.addEventListener('resize', resize);
+setupSidePanel();
 
 async function start() {
 	try {
 		state.config = await (await api('/api/state')).json();
 		$('root-label').textContent = state.config.root;
-		$('tbf').value = state.config.tbf_mib;
-		$('pbf').value = state.config.pbf_mib;
+		showRootEditor(false);
+		makeClient();
+		showCache('client', null);
+		globalThis.setInterval?.(() => { refreshCache(); }, kCacheRefreshMs);
 		$('threads').value = state.config.threads;
 		$('backend').options[1].disabled = !state.config.openslide;
 		setupHalo();
 		setupGenerate();
 		setupAnalyse();
-		$('connection').textContent = 'Local connection';
+		$('connection').textContent = connectionLabel();
+		if (!writable()) {
+			for (const id of ['generate', 'make-gallery']) Object.assign($(id), {disabled: true, title: remoteWriteRefused});
+		}
 		status('Ready · Open an image to begin');
 		resize();
+// An image named on the server's command line wins over this browser's last.
+		const remembered = state.config.initial_image ? null : rememberedImage();
 		if (state.config.initial_image) { $('path').value = state.config.initial_image; requestOpen(); }
+		else if (remembered) restoreImage(remembered);
 		const running = state.config.analyse && await (await api('/api/analyse')).json();
 		if (running?.running) { setAnalysing(true); pollAnalyse().catch(failAnalyse); }
 	} catch (error) { status(error.message); $('connection').textContent = 'Connection unavailable'; }

@@ -434,7 +434,7 @@ bool serialize_remote_geometry ( const Ppyr &pyramid, std::vector<uint8_t> *out,
 }
 
 
-bool read_remote_tile ( WsiLoader &loader, const Ppyr &pyramid, int level_no,
+bool read_remote_tile ( WsiLoader &loader, Ppyr &pyramid, int level_no,
 	int tile_no, std::vector<uint8_t> *bytes, std::string *error )
 {
 	if (!bytes || level_no < 0 || level_no >= (int)pyramid.levels.size())

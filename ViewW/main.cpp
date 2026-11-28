@@ -25,6 +25,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -33,7 +35,9 @@ volatile std::sig_atomic_t stopping = 0;
 void stop_signal ( int ) { stopping = 1; }
 
 
-std::filesystem::path user_log_directory ()
+// The viewer's per-user state directory (logs, the saved image root); empty when
+// the environment names none.
+std::filesystem::path user_state_directory ()
 {
 #ifdef _WIN32
 //
@@ -44,15 +48,22 @@ std::filesystem::path user_log_directory ()
 		auto path = std::filesystem::path( base );
 		std::free( base );
 		if (!path.empty())
-			return path / "Pyra" / "web-logs";
+			return path / "Pyra";
 	}
 #else
 	if (const auto *base = std::getenv( "XDG_STATE_HOME" ); base && *base)
-		return pyra::web::utf8_path( base ) / "pyra" / "web-logs";
+		return pyra::web::utf8_path( base ) / "pyra";
 	if (const auto *base = std::getenv( "HOME" ); base && *base)
-		return pyra::web::utf8_path( base ) / ".local/state/pyra/web-logs";
+		return pyra::web::utf8_path( base ) / ".local/state/pyra";
 #endif
-	return pyra::web::utf8_path( PYRA_WEB_LOG_DIRECTORY );
+	return {};
+}
+
+
+std::filesystem::path user_log_directory ()
+{
+	const auto state = user_state_directory();
+	return state.empty() ? pyra::web::utf8_path( PYRA_WEB_LOG_DIRECTORY ) : state / "web-logs";
 }
 
 
@@ -102,6 +113,7 @@ int main ( int argc, char **argv )
 {
 	try {
 		auto root = pyra::web::utf8_path( PYRA_WEB_IMAGE_DIRECTORY );
+		auto root_given = false;
 		auto initial = std::string{};
 		auto log_directory = user_log_directory();
 		auto port = 8765;
@@ -113,24 +125,29 @@ int main ( int argc, char **argv )
 				std::cout << "Usage: PyrA_Web_Viewer [--root IMAGE_DIRECTORY] [--image RELATIVE_PATH]\n"
 					"                     [--port PORT] [--log-dir DIRECTORY]\n"
 					"                     [--scripts DIR] [--bridge-cli PATH] [--bridge-worker PATH] [--python PATH]\n"
-					"                     [--public-origin https://HOST[:PORT]] [--view-halo PERCENT]\n"
+					"                     [--public-origin https://HOST[:PORT]]... [--allow-remote-write]\n"
+					"                     [--view-halo PERCENT]\n"
+					"Without --root, the image directory last chosen in the viewer (Change) is used, else the build default.\n"
 					"Analyse offers the *.py files of --scripts (default: the bridge's examples).\n"
-					"--public-origin also accepts requests a reverse proxy forwards from that origin.\n"
+					"--public-origin (repeatable) also accepts requests a reverse proxy forwards from that origin,\n"
+					"from browsers that opened the printed access URL once. Network clients cannot generate,\n"
+					"make galleries or analyse unless --allow-remote-write is given.\n"
 					<< std::format( "--view-halo is the default band rendered around each view, percent of its width "
 						"(0..{}, default {}).\n", pyra::web::kViewHaloMaxPercent, pyra::web::kViewHaloDefaultPercent )
 					<< "Open the printed loopback URL in your browser. Ctrl+C stops the server.\n";
 				return 0;
 			}
+			if (argument == "--allow-remote-write") { bridge.allow_remote_write = true; continue; }
 			if (i + 1 == argc) throw std::invalid_argument( "Missing value for " + argument );
 			const auto value = std::string( argv[++i] );
-			if (argument == "--root") root = pyra::web::utf8_path( value );
+			if (argument == "--root") { root = pyra::web::utf8_path( value ); root_given = true; }
 			else if (argument == "--image") initial = value;
 			else if (argument == "--log-dir") log_directory = pyra::web::utf8_path( value );
 			else if (argument == "--scripts") bridge.scripts = pyra::web::utf8_path( value );
 			else if (argument == "--bridge-cli") bridge.bridge_cli = pyra::web::utf8_path( value );
 			else if (argument == "--bridge-worker") bridge.bridge_worker = pyra::web::utf8_path( value );
 			else if (argument == "--python") bridge.python = pyra::web::utf8_path( value );
-			else if (argument == "--public-origin") bridge.public_origin = value;
+			else if (argument == "--public-origin") bridge.public_origins.push_back( value );
 			else if (argument == "--view-halo") {
 				auto end = size_t{};
 				bridge.view_halo_percent = std::stoi( value, &end );
@@ -157,15 +174,36 @@ int main ( int argc, char **argv )
 			const auto guard = std::lock_guard( log_mutex );
 			log << message << '\n' << std::flush;
 		};
-		auto server = pyra::web::Server( { root, initial, write_log, bridge.scripts, bridge.bridge_cli,
-			bridge.bridge_worker, bridge.python, bridge.public_origin, bridge.view_halo_percent } );
+// The root a browser last chose (Change in the Open dialog) unless --root names one.
+		const auto state_directory = user_state_directory();
+		if (!state_directory.empty())
+			bridge.root_file = state_directory / "web-root.txt";
+		auto root_source = std::string( root_given ? "--root" : "default" );
+		if (!root_given && !bridge.root_file.empty()) {
+			auto error = std::error_code{};
+			if (pyra::web::read_saved_root( bridge.root_file, &root ))
+				root_source = "saved";
+			else if (std::filesystem::exists( bridge.root_file, error ))
+				std::cout << "Saved image root in " << bridge.root_file << " is not a directory; using the default\n";
+		}
+		bridge.root = root;
+		bridge.initial_image = initial;
+		bridge.log = write_log;
+		const auto scripts = bridge.scripts;
+		const auto public_origins = bridge.public_origins;
+		auto server = pyra::web::Server( std::move( bridge ) );
 		port = server.bind( port );
 		if (port < 0) throw std::runtime_error( "Cannot bind loopback port; use --port 0 to select a free one" );
 		const auto url = std::format( "http://127.0.0.1:{}/", port );
 		write_log( "Listening at " + url );
-		std::cout << "PyrA viewer: " << url << "\nImage root: " << root
-			<< "\nAnalyse scripts: " << ( bridge.scripts.empty() ? std::filesystem::path( "(none)" ) : bridge.scripts )
-			<< "\nSession log: " << log_path << "\nCtrl+C to stop.\n" << std::flush;
+		std::cout << "PyrA viewer: " << url << "\nImage root: " << root << " (" << root_source << ")"
+			<< "\nAnalyse scripts: " << ( scripts.empty() ? std::filesystem::path( "(none)" ) : scripts )
+			<< "\nSession log: " << log_path << '\n';
+		for (auto origin : public_origins) {
+			while (origin.ends_with( '/' )) origin.pop_back();
+			std::cout << "Network access (open once in each browser): " << origin << "/?key=" << server.access_key() << '\n';
+		}
+		std::cout << "Ctrl+C to stop.\n" << std::flush;
 		std::signal( SIGINT, stop_signal );
 		std::signal( SIGTERM, stop_signal );
 		auto watcher = std::jthread( [&] ( std::stop_token token ) {

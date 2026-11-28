@@ -4,11 +4,12 @@
 
 #pragma once
 
-// The viewer's display conversion: a rendered raster in any plane format to
-// top-down RGBA8. One definition for the server's /api/render frames and the
-// browser client's own renders (wasm/pyra_client.cpp), so both show the same
+// Pvue's one-plane display conversion: a rendered raster in any plane format to
+// top-down RGBA8. One definition for the server's fallback /api/render frames
+// and the browser client's renders (view_compose.cpp), so both show the same
 // pixels. Native RGB8/Gray8 samples keep their values; wider samples are scaled
-// by the plane's advertised maximum sample value.
+// by the plane's advertised maximum sample value, which for integer samples is
+// Core's narrow_to_8bit (both truncate the exact quotient).
 
 #include <pyra/pyra.h>
 
@@ -17,7 +18,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace pyra::web {
+namespace pyra::pvue {
 
 inline uint8_t display_sample ( const unsigned char *row, size_t index, pyra_pixel_format format, double range )
 {
@@ -74,4 +75,4 @@ inline void display_rgba ( const unsigned char *source, const pyra_image_layout 
 	}
 }
 
-} // namespace pyra::web
+} // namespace pyra::pvue

@@ -135,9 +135,7 @@ set(PYR_SOURCES
 	gallery.cpp
 	gallery_scan.cpp
 	img_codec.cpp
-	img_czi.cpp
 	img_htj2k.cpp
-	img_jxr.cpp
 	img_tiff.cpp
 	ipx_imd.cpp
 	ipx_layout.cpp
@@ -428,40 +426,8 @@ if(PYR_WITH_DCMTK)
 	target_link_libraries(pyra_core PRIVATE DCMTK::DCMTK)
 endif()
 
-# CZI sub-block payload decoders, built from the bundled sources (img_czi.cpp).
-if(PYR_WITH_ZSTD)
-	file(GLOB PYRA_ZSTD_SOURCES CONFIGURE_DEPENDS
-		"${CMAKE_CURRENT_SOURCE_DIR}/Deps/zstd/lib/common/*.c"
-		"${CMAKE_CURRENT_SOURCE_DIR}/Deps/zstd/lib/decompress/*.c")
-	add_library(pyra_zstd STATIC ${PYRA_ZSTD_SOURCES})
-	target_include_directories(pyra_zstd PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/Deps/zstd/lib")
-	target_compile_definitions(pyra_zstd PRIVATE ZSTD_DISABLE_ASM ZSTD_MULTITHREAD=0)
-	set_target_properties(pyra_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON)
-	target_link_libraries(pyra_core PRIVATE pyra_zstd)
-endif()
-if(PYR_WITH_JXR)
-	set(PYRA_JXR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Deps/jxrlib")
-	file(GLOB PYRA_JXR_SOURCES CONFIGURE_DEPENDS
-		"${PYRA_JXR_DIR}/common/src/*.c"
-		"${PYRA_JXR_DIR}/image/decode/*.c"
-		"${PYRA_JXR_DIR}/image/encode/*.c"
-		"${PYRA_JXR_DIR}/image/sys/*.c"
-		"${PYRA_JXR_DIR}/jxrgluelib/*.c")
-	add_library(pyra_jxr STATIC ${PYRA_JXR_SOURCES})
-# jxrlib ships its own guiddef.h, which must not shadow the Windows SDK's in
-# other translation units: only the jxrlib sources and img_jxr.cpp see its headers.
-	set(PYRA_JXR_INCLUDES "${PYRA_JXR_DIR}/jxrgluelib" "${PYRA_JXR_DIR}/image/sys" "${PYRA_JXR_DIR}/common/include")
-	target_include_directories(pyra_jxr PRIVATE ${PYRA_JXR_INCLUDES} "${PYRA_JXR_DIR}/pyra")
-	set_source_files_properties("${PYRA_CORE_SOURCE_DIR}/img_jxr.cpp" TARGET_DIRECTORY pyra_core
-		PROPERTIES INCLUDE_DIRECTORIES "${PYRA_JXR_INCLUDES}")
-	set_target_properties(pyra_jxr PROPERTIES POSITION_INDEPENDENT_CODE ON)
-	if(MSVC)
-		target_compile_options(pyra_jxr PRIVATE /W0)
-	else()
-		target_compile_options(pyra_jxr PRIVATE -w)
-	endif()
-	target_link_libraries(pyra_core PRIVATE pyra_jxr)
-endif()
+include(cmake/PyraBundledCodecs.cmake)
+pyra_add_bundled_tile_codecs(pyra_core)
 
 if(PYR_WITH_CZI)
 #
@@ -488,10 +454,11 @@ endif()
 if(PYRA_BUILD_GUI_TEST)
 	add_subdirectory(ViewD)
 endif()
+# Pvue, the display layer viewers share; its browser client is built by an
+# Emscripten configure of this tree.
+if(PYRA_BUILD_WEB_TEST OR EMSCRIPTEN)
+	add_subdirectory(Pvue)
+endif()
 if(PYRA_BUILD_WEB_TEST)
 	add_subdirectory(ViewW)
-endif()
-# The web viewer's browser client, built by an Emscripten configure of this tree.
-if(EMSCRIPTEN)
-	add_subdirectory(ViewW/wasm)
 endif()

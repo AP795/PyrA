@@ -1257,7 +1257,13 @@ Pwhl<pixeltype> WsiLoader::GenerateSpan (
 			}
 		}
 
-		if (whole_wsi_request && !is_finest &&
+//
+// A level is judged blank only from a frame it painted whole. On a remote slide
+// (deferred tiles) the first pass misses tiles that are on their way: that frame
+// is black for want of them, and rejecting the level would walk the request down
+// to the finest one - a whole-slide overview of base pixels.
+		const auto awaiting = pyramid.deferred_tiles && tile_stats.load_fail > 0;
+		if (whole_wsi_request && !is_finest && !awaiting &&
 			( IsAllBlack( active_render->image ) ||
 			  IsSparseDarkWholeWsiFrame(
 				  active_render->image, level.max_pixel_value ) )) {
@@ -1275,7 +1281,7 @@ Pwhl<pixeltype> WsiLoader::GenerateSpan (
 			{px_l - active_render->lr.tl.x, px_t - active_render->lr.tl.y},
 			{px_r - active_render->lr.tl.x, px_b - active_render->lr.tl.y}
 		} );
-		if (!whole_wsi_request || is_finest ||
+		if (!whole_wsi_request || is_finest || awaiting ||
 			( !IsAllBlack( span ) &&
 			  !IsSparseDarkWholeWsiFrame( span, level.max_pixel_value ) )) {
 			pyramid.stats.render_ms += ElapsedMs( render_t0 );

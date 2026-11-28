@@ -17,13 +17,37 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <shared_mutex>
 #include <thread>
 #include <utility>
 #include <vector>
 
 namespace priml {
 
-bool WsiLoader::ReadEncodedTile ( const Ppyr &pyramid, int level_no, int tile_no,
+bool WsiLoader::RecacheEncodedTile ( Ppyr &pyramid, int level_no, int tile_no )
+{
+	auto &level = pyramid.levels[level_no];
+	auto &tile = level.tiles[tile_no];
+	if (level.tile_buffer_bytes == 0)
+		return false;
+	auto *scratch = compressed_tile_scratch( level.tile_buffer_bytes );
+	auto size = size_t{};
+	if (!AssembleTile( level, tile, scratch, size, 0 ) || size == 0 || size > level.tile_buffer_bytes)
+		return false;
+	const auto slot = AcquireTileBfSlot( pyramid, level_no, tile_no, size );
+	if (slot < 0)
+		return false;
+	{
+		auto guard = std::shared_lock( cache_lock( pyramid, false, level_no ) );
+		std::memcpy( cache_pool( pyramid, false, level_no ).slot_ptr( slot ), scratch, size );
+	}
+	tile.ninbuf = slot;
+	tile.bf_sz = size;
+	return true;
+}
+
+
+bool WsiLoader::ReadEncodedTile ( Ppyr &pyramid, int level_no, int tile_no,
 	std::vector<uint8_t> *bytes, std::string *error )
 {
 	const auto operation = std::scoped_lock( *pyramid.render_mutex_ );
@@ -41,11 +65,43 @@ bool WsiLoader::ReadEncodedTile ( const Ppyr &pyramid, int level_no, int tile_no
 	const auto &level = pyramid.levels[level_no];
 	if (level.synthetic || tile_no < 0 || tile_no >= (int)level.tiles.size())
 		return fail( "Encoded-tile request requires a stored source tile" );
-	const auto &tile = level.tiles[tile_no];
+	auto &tile = pyramid.levels[level_no].tiles[tile_no];
 	if (tile.fsz == 0)
 		return true;
 	if (level.tile_buffer_bytes == 0)
 		return fail( "Source tile has no encoded-buffer size" );
+	tile.last_use.store( pyr::next_version(), std::memory_order_relaxed );
+	auto status = tile.sts.load( std::memory_order_acquire );
+	if (status == TileSts::Loading || status == TileSts::Decoding)
+		status = WaitForTileIdle( tile );
+	auto cached = tile.ninbuf >= 0 && tile.bf_sz > 0;
+	++( cached ? pyramid.stats.compressed_cache_hits : pyramid.stats.compressed_cache_misses );
+	if (!cached) {
+// Empty: the loader's own load path, as a render would take it. Ready: decoded
+// pixels outlived the compressed slot, so only the slot is refilled.
+		if (status == TileSts::Empty)
+			(void)LoadTile( pyramid, level_no, tile_no );
+		else if (status == TileSts::Ready)
+			(void)RecacheEncodedTile( pyramid, level_no, tile_no );
+		cached = tile.ninbuf >= 0 && tile.bf_sz > 0;
+		if (cached)
+			++pyramid.stats.tile_loads;
+	}
+	if (cached) {
+		auto guard = std::shared_lock( cache_lock( pyramid, false, level_no ) );
+		const auto *slot = cache_pool( pyramid, false, level_no ).slot_ptr( tile.ninbuf );
+		bytes->assign( slot, slot + tile.bf_sz );
+		return true;
+	}
+// No slot could be had (the budget is smaller than a slot, or taken by tiles in
+// use): read past the cache rather than fail the request, and count it - the
+// compressed budget is too small for this workflow.
+// Logged once per slide; the count says how often.
+	if (++pyramid.stats.compressed_cache_bypasses == 1)
+		pyr::plog( "wsi tile bypass: lvl=%d tile=%d alloc=%zu used=%d/%d cap=%zu reason=no compressed slot; "
+			"encoded tile read past the cache, the compressed budget is too small (later bypasses only counted)\n",
+			level_no, tile_no, pyramid.tbf.allocated_bytes(), pyramid.tbf.used_slots(), pyramid.tbf.num_slots(),
+			pyramid.tbf_cap_bytes );
 	bytes->resize( level.tile_buffer_bytes );
 	auto size = size_t{};
 	if (!AssembleTile( level, tile, bytes->data(), size, 0 ) ||
@@ -55,6 +111,7 @@ bool WsiLoader::ReadEncodedTile ( const Ppyr &pyramid, int level_no, int tile_no
 		return fail( "Cannot read compressed source tile without decoding" );
 	}
 	bytes->resize( size );
+	++pyramid.stats.tile_loads;
 	return true;
 }
 
@@ -238,7 +295,7 @@ bool EnsureTilesLoaded ( WsiLoader &loader,
 		auto load_t0 = std::chrono::steady_clock::now();
 		auto ok = loader.LoadTile( pyramid, plan.level_no, to_load[0] );
 		pyramid.stats.tile_load_ms += ElapsedMs( load_t0 );
-		if (ok) { pyramid.stats.tile_loads++; load_ok++; }
+		if (ok) { pyramid.stats.tile_loads += level.tiles[to_load[0]].fsz > 0; load_ok++; }
 		else load_fail++;
 		return true;
 	}
@@ -247,7 +304,7 @@ bool EnsureTilesLoaded ( WsiLoader &loader,
 	auto load_t0 = std::chrono::steady_clock::now();
 	for (auto tile_no : to_load) {
 		auto ok = loader.LoadTile( pyramid, plan.level_no, tile_no );
-		if (ok) { pyramid.stats.tile_loads++; load_ok++; }
+		if (ok) { pyramid.stats.tile_loads += level.tiles[tile_no].fsz > 0; load_ok++; }
 		else load_fail++;
 	}
 	pyramid.stats.tile_load_ms += ElapsedMs( load_t0 );
@@ -636,10 +693,10 @@ static Pwhl<pixeltype> DecimateLevelIntoImage ( WsiLoader &loader,
 // decoded caching instead reuses temporary pixel slots between batches. Bound
 // pinned storage by each enabled cap, leaving headroom for other cached tiles.
 // Decimation stays in tile order to preserve overlap painting.
-// The largest slot either kind may hand out: under PerPyramid that is the
-// arena's, which can exceed this level's own tile.
-	const auto compressed_slot_bytes = std::max( src.tile_buffer_bytes,
-		cache_pool( pyramid, false, src_level_no ).slot_bytes() );
+// The most one tile may take in either kind: a compressed entry is at most the
+// level's largest assembled tile; a decoded slot under PerPyramid is the arena's,
+// which can exceed this level's own tile.
+	const auto compressed_slot_bytes = src.tile_buffer_bytes;
 	const auto decoded_slot_bytes = std::max( (size_t)src.tile_w * (size_t)src.tile_h *
 		pixel_size_bytes( src.pixel_type ), cache_pool( pyramid, true, src_level_no ).slot_bytes() );
 	const auto keep_decoded = pyramid.use_pixbf_auto ? pyramid.prefer_pixbf : pyramid.use_pixbf;

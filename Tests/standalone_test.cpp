@@ -177,6 +177,40 @@ void write_color_fixture ( const std::filesystem::path &output,
 }
 
 
+// A slide of named monochrome channels (the C API's channel planes), one level
+// each, every channel a different gradient so a composite shows which is which.
+template <typename Pixel>
+void write_channel_fixture ( const std::filesystem::path &output, const char *name,
+	const std::vector<std::string> &channels, priml::ImgCodec codec, int range )
+{
+	auto writer = priml::PtfWriter{};
+	auto error = std::string{};
+	require( writer.open( ( output / name ).string(), &error ), "Channel fixture open: " + error );
+	for (auto c = 0; c < (int)channels.size(); ++c) {
+		auto spec = priml::PtfLevelSpec{};
+		spec.tags.valid = true;
+		spec.tags.mpp = 0.5;
+		spec.tags.pixel_type = priml::pixel_type_of<Pixel>::value;
+		spec.tags.max_pixel_value = range;
+		spec.tags.channel = channels[c];
+		spec.size = { 600, 400 };
+		spec.tile = { 128, 128 };
+		spec.codec = codec;
+		spec.encode.quality = codec == priml::ImgCodec::Jp2k ? priml::kImageLosslessQuality
+			: priml::kImageDefaultLossyQuality;
+		auto fetch = priml::PtfTileFetch<Pixel>( [c, range] ( const priml::Rtlbr<int> &rect, priml::Pwhl<Pixel> *tile ) {
+			for (auto y = 0; y < tile->h; ++y)
+				for (auto x = 0; x < tile->w; ++x)
+					tile->rowp( y )[x] = Pixel( ( ( rect.tl.x + x ) / 3 + ( rect.tl.y + y ) / 2 + 70 * c ) *
+						( range / 255 ) % ( range + 1 ) );
+			return true;
+		} );
+		require( writer.add_level( spec, fetch, &error ), "Channel fixture level: " + error );
+	}
+	require( writer.close( &error ), "Channel fixture close: " + error );
+}
+
+
 template <typename Function>
 bool run_case ( const char *name, Function function )
 {
@@ -258,6 +292,14 @@ int main ( int argc, char **argv )
 		write_color_fixture( output, "rgb8.ptf", priml::ImgCodec::Jpeg, priml::Rgb8{ 37, 117, 220 }, 255 );
 #if USE_OPENJPEG
 		write_color_fixture( output, "rgb16.ptf", priml::ImgCodec::Jp2k, priml::Rgb16{ 511, 2048, 4095 }, 4095 );
+#endif
+	} );
+	passed &= run_case( "write_c_api_channel_fixtures", [&] {
+		const auto output = std::filesystem::path( argv[1] );
+		write_channel_fixture<uint8_t>( output, "channels_rgb.ptf", { "DAPI", "R", "G", "B" }, priml::ImgCodec::Jpeg, 255 );
+		write_channel_fixture<uint8_t>( output, "channels_two.ptf", { "DAPI", "FITC" }, priml::ImgCodec::Jpeg, 255 );
+#if USE_OPENJPEG
+		write_channel_fixture<uint16_t>( output, "channels_rgb16.ptf", { "R", "G", "B" }, priml::ImgCodec::Jp2k, 4095 );
 #endif
 	} );
 	return passed ? 0 : 1;

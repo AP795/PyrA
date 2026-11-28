@@ -12,12 +12,15 @@ const vm = require('node:vm');
 
 // Exercise the shipped script and its event wiring with a minimal DOM. These
 // checks do not replace browser layout, painting, or native range-input checks.
-async function viewer(dicom = true) {
+async function viewer(dicom = true, {globals = {}, client = false, local = true, responses = {}, initial = ''} = {}) {
 	const elements = new Map();
 	function element(id) {
 		if (!elements.has(id)) elements.set(id, {
 			value: '0', width: 640, height: 480, clientWidth: 640, clientHeight: 480,
-			listeners: {}, attributes: {}, options: [{}, {}], children: [],
+			listeners: {}, attributes: {}, options: [{}, {}], children: [], classes: new Set(),
+			style: {props: {}, setProperty(name, value) { this.props[name] = value; }},
+			getBoundingClientRect() { return {left: 0, right: 1000, width: 1000}; },
+			classList: {toggle(name, on) { const set = elements.get(id).classes; if (on) set.add(name); else set.delete(name); }},
 			addEventListener(name, handler) { this.listeners[name] = handler; },
 			close() { this.open = false; }, showModal() { this.open = true; },
 			setAttribute(name, value) { this.attributes[name] = value; },
@@ -26,7 +29,7 @@ async function viewer(dicom = true) {
 		});
 		return elements.get(id);
 	}
-	const config = {max_edge: 4096, root: '.', tbf_mib: 32, pbf_mib: 32, threads: 4, view_halo: 20, view_halo_max: 50, synthetic: {
+	const config = {max_edge: 4096, root: '/images', local, initial_image: initial, tbf_mib: 32, pbf_mib: 32, client, server_pbf_mib: 0, client_tbf_mib: 256, client_pbf_mib: 256, client_cache_max_mib: 768, threads: 4, view_halo: 20, view_halo_max: 50, synthetic: {
 		codecs: [{id: 1, name: 'JPEG', lossless: false, lossy: true, dicom, tiled: true, untiled: true},
 			{id: 4, name: 'JPEG XL', lossless: true, lossy: true, dicom: false, tiled: true, untiled: false},
 			{id: 6, name: 'LZW', lossless: true, lossy: false, dicom: false, tiled: false, untiled: true}],
@@ -36,30 +39,44 @@ async function viewer(dicom = true) {
 		spacing: 12, spacing_min: 4, spacing_max: 200, positive: 0.3, tumour: 0.4, lymphocytes: 0.4}};
 // Armed timers are kept so a test can fire them; the script holds the id.
 	const timers = [];
+	const fetches = [];
+// Form bodies sent, as [path, fields]; a function in `responses` answers its
+// path with a whole response (a failure, say).
+	const posted = [];
 	const context = vm.createContext({
 		document: {getElementById: element, querySelector: () => ({content: 'test'}),
 			addEventListener() {}, createElement: () => ({})},
 		window: {devicePixelRatio: 1, addEventListener() {}},
 		ResizeObserver: class { observe() {} },
-		fetch: async () => ({ok: true, json: async () => config}),
+		fetch: async (url, options = {}) => {
+			const path = String(url).split('?')[0];
+			fetches.push(String(url));
+			if (options.body instanceof URLSearchParams) posted.push([path, Object.fromEntries(options.body)]);
+			if (typeof responses[path] === 'function') return responses[path]();
+			return {ok: true, json: async () => path in responses ? responses[path] : config};
+		},
 		setTimeout: callback => timers.push(callback), clearTimeout() {}, URLSearchParams,
 		performance: {now: () => 0}, ImageData: class { constructor(data, width, height) { Object.assign(this, {data, width, height}); } },
-		createImageBitmap: async image => ({width: image.width, height: image.height, close() {}})
+		createImageBitmap: async image => ({width: image.width, height: image.height, close() {}}),
+		...globals
 	});
+	vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'Pvue', 'web', 'pvue_view.js'), 'utf8'), context);
 	vm.runInContext(fs.readFileSync(path.join(__dirname, 'viewer.js'), 'utf8'), context);
 	await new Promise(setImmediate);
-	const runtime = vm.runInContext('({state, selectPlane, updateControls, viewRequest, setGenerating, doOpen, ' +
-		'matchingPlane, analyseMessage, analyseTables, updateAnalyseButton, changed, haloRequest, needsRender, pump})', context);
+	const runtime = vm.runInContext('({state, selectPlane, updateControls, viewRequest, setGenerating, doOpen, refreshCache, ' +
+		'matchingPlane, analyseMessage, analyseTables, updateAnalyseButton, changed, haloRequest, needsRender, pump, ' +
+		'clientOpened})', context);
 	const planes = [
 		{index: 0, channel: 'G', z: 9, mpp: 1, x: 0, y: 0, width: 1000, height: 1000},
 		{index: 1, channel: 'DAPI', z: 2, mpp: 1, x: 0, y: 0, width: 1000, height: 1000},
 		{index: 2, channel: 'G', z: -3, mpp: 1, x: 0, y: 0, width: 1000, height: 1000},
 		{index: 3, channel: 'G', z: 2, mpp: 1, x: 0, y: 0, width: 1000, height: 1000}
 	];
-	Object.assign(runtime.state, {image: {planes}, busy: true, generation: 7});
+	for (const plane of planes) plane.key = String(plane.index);
+	Object.assign(runtime.state, {image: {planes}, views: [...planes], busy: true, generation: 7});
 	element('plane').value = '2';
 	runtime.selectPlane();
-	return {...runtime, element, context, timers};
+	return {...runtime, element, context, timers, fetches, posted};
 }
 
 test('test_viewer_z_slider_uses_sorted_positions_in_current_channel', async () => {
@@ -263,6 +280,122 @@ test('test_viewer_analyse_tables_time_each_phase', async () => {
 	assert.deepEqual(tables[2][1][6], ['Workers busy on average', '6.7 of 10']);
 });
 
+// A localStorage stand-in holding `items`.
+function storage(items = {}) {
+	return {items, getItem(key) { return key in this.items ? this.items[key] : null; },
+		setItem(key, value) { this.items[key] = String(value); }, removeItem(key) { delete this.items[key]; }};
+}
+
+const rememberedOptions = {path: 'svs/a.svs', backend: '0', threads: '2'};
+// The cache fields an open sends with the default settings and the native reader.
+const defaultCacheFields = {tbf_mib: '32', pbf_mib: '0', topology: '0'};
+
+test('test_viewer_side_panel_default_width', async () => {
+	const {element} = await viewer(true, {globals: {localStorage: storage()}});
+	assert.equal(element('main').style.props['--side-width'], '360px');
+});
+
+test('test_viewer_side_panel_restores_remembered_width', async () => {
+	const {element} = await viewer(true, {globals: {localStorage: storage({'pyra.sideWidth': '420'})}});
+	assert.equal(element('main').style.props['--side-width'], '420px');
+});
+
+test('test_viewer_side_panel_restore_not_capped_by_layout_at_load', async () => {
+	const {element} = await viewer(true, {globals: {localStorage: storage({'pyra.sideWidth': '700'})}});
+	assert.equal(element('main').style.props['--side-width'], '700px');
+});
+
+test('test_viewer_side_panel_drag_resizes_and_remembers', async () => {
+	const localStorage = storage();
+	const {element} = await viewer(true, {globals: {localStorage}});
+	const splitter = element('splitter');
+	const event = clientX => ({pointerId: 1, clientX, preventDefault() {}});
+	splitter.listeners.pointerdown(event(640));
+	splitter.listeners.pointermove(event(500));
+	assert.equal(element('main').style.props['--side-width'], '500px');
+	assert.equal(localStorage.items['pyra.sideWidth'], undefined);
+	splitter.listeners.pointerup(event(550));
+	assert.equal(element('main').style.props['--side-width'], '450px');
+	assert.equal(localStorage.items['pyra.sideWidth'], '450');
+});
+
+test('test_viewer_side_panel_drag_keeps_grab_offset', async () => {
+	const {element} = await viewer(true, {globals: {localStorage: storage()}});
+	const splitter = element('splitter');
+	const event = clientX => ({pointerId: 1, clientX, preventDefault() {}});
+	splitter.listeners.pointerdown(event(644));
+	splitter.listeners.pointermove(event(644));
+	assert.equal(element('main').style.props['--side-width'], '360px');
+	splitter.listeners.pointerup(event(544));
+	assert.equal(element('main').style.props['--side-width'], '460px');
+});
+
+test('test_viewer_side_panel_width_clamped', async () => {
+	const localStorage = storage();
+	const {element} = await viewer(true, {globals: {localStorage}});
+	const splitter = element('splitter');
+	const event = clientX => ({pointerId: 1, clientX, preventDefault() {}});
+	splitter.listeners.pointerdown(event(640));
+	splitter.listeners.pointerup(event(50));
+	assert.equal(element('main').style.props['--side-width'], '600px');
+	splitter.listeners.pointerdown(event(400));
+	splitter.listeners.pointerup(event(990));
+	assert.equal(element('main').style.props['--side-width'], '240px');
+});
+
+test('test_viewer_side_panel_double_click_resets', async () => {
+	const localStorage = storage({'pyra.sideWidth': '500'});
+	const {element} = await viewer(true, {globals: {localStorage}});
+	element('splitter').listeners.dblclick();
+	assert.equal(element('main').style.props['--side-width'], '360px');
+	assert.equal(localStorage.items['pyra.sideWidth'], undefined);
+});
+
+test('test_viewer_side_panel_arrow_keys_resize', async () => {
+	const localStorage = storage();
+	const {element} = await viewer(true, {globals: {localStorage}});
+	element('splitter').listeners.keydown({key: 'ArrowLeft', preventDefault() {}});
+	assert.equal(element('main').style.props['--side-width'], '376px');
+	assert.equal(localStorage.items['pyra.sideWidth'], '376');
+});
+
+test('test_viewer_remembers_opened_image', async () => {
+	const localStorage = storage();
+	const {state, doOpen, context} = await viewer(true, {globals: {localStorage}});
+	context.fetch = async () => ({ok: true, json: async () => ({generation: 9, open_ms: 1, planes: state.image.planes, properties: []})});
+	await doOpen({epoch: state.epoch, options: {...rememberedOptions, ...defaultCacheFields}});
+	assert.deepEqual(JSON.parse(localStorage.items['pyra.openedImage']), {root: '/images', options: rememberedOptions});
+});
+
+// The opens a test's viewer sent: the form of each /api/open.
+const opens = posted => posted.filter(([route]) => route === '/api/open').map(([, form]) => form);
+const remembered = root => storage({'pyra.openedImage': JSON.stringify({root, options: rememberedOptions})});
+const openFails = () => ({ok: false, status: 400, json: async () => ({error: 'No such file'})});
+
+test('test_viewer_restores_remembered_image_at_start', async () => {
+	const {posted} = await viewer(true, {globals: {localStorage: remembered('/images')}, responses: {'/api/open': openFails}});
+	assert.deepEqual(opens(posted), [{...rememberedOptions, ...defaultCacheFields}]);
+});
+
+test('test_viewer_ignores_image_remembered_under_another_root', async () => {
+	const {posted} = await viewer(true, {globals: {localStorage: remembered('/elsewhere')}, responses: {'/api/open': openFails}});
+	assert.deepEqual(opens(posted), []);
+});
+
+test('test_viewer_command_line_image_wins_over_remembered', async () => {
+	const {posted} = await viewer(true, {globals: {localStorage: remembered('/images')}, initial: 'given.ptf',
+		responses: {'/api/open': openFails}});
+	assert.deepEqual(opens(posted).map(form => form.path), ['given.ptf']);
+});
+
+test('test_viewer_forgets_remembered_image_that_fails', async () => {
+	const localStorage = remembered('/images');
+	const {element, posted} = await viewer(true, {globals: {localStorage}, responses: {'/api/open': openFails}});
+	assert.equal(opens(posted).length, 1);
+	assert.equal('pyra.openedImage' in localStorage.items, false);
+	assert.equal(element('open-error').textContent, 'No such file');
+});
+
 test('test_viewer_analyse_reload_preserves_view_and_plane', async () => {
 	const {state, element, doOpen, matchingPlane, context} = await viewer();
 	element('plane').value = '3';
@@ -393,4 +526,298 @@ test('test_viewer_halo_field_clamped_to_server_limit', async () => {
 	element('halo').listeners.change();
 	assert.equal(state.halo, 50);
 	assert.equal(element('halo').value, 50);
+});
+
+test('test_viewer_colour_composite_is_listed_first_and_selected', async () => {
+	const {state, element, clientOpened, viewRequest} = await viewer();
+	state.preferColour = true;
+	clientOpened([{reference: 3, planes: [3, 2, 0]}]);
+	assert.equal(element('plane').value, 'display:3');
+	assert.equal(element('plane').children[0].textContent, 'Colour (R, G, B) · Z 2 µm');
+	assert.equal(state.plane.display, true);
+	assert.equal(viewRequest().display, true);
+	assert.equal(viewRequest().plane, 3);
+	assert.equal(element('z-control').hidden, true);
+	element('plane').value = '1';
+	element('plane').listeners.change();
+	assert.equal(viewRequest().display, false);
+});
+
+test('test_viewer_colour_composite_not_forced_after_choice', async () => {
+	const {state, element, clientOpened} = await viewer();
+	state.preferColour = true;
+	element('plane').value = '1';
+	element('plane').listeners.change();
+	clientOpened([{reference: 3, planes: [3, 2, 0]}]);
+	assert.equal(element('plane').value, '1');
+	assert.equal(state.plane.channel, 'DAPI');
+});
+
+// A browser with workers; the client reports its start through the worker.
+const capable = {Worker: class { postMessage() {} }, WebAssembly: {}, crossOriginIsolated: true,
+	navigator: {hardwareConcurrency: 4}};
+
+// A value made in the viewer's realm, as this realm's plain data.
+const plain = value => JSON.parse(JSON.stringify(value));
+
+// Opens the Settings dialog; `fields` then sets its inputs by id suffix.
+function settings(element, fields = {}) {
+	element('settings').listeners.click();
+	for (const [suffix, value] of Object.entries(fields)) {
+		const field = element(`settings-${suffix}`);
+		if (typeof value === 'boolean') field.checked = value;
+		else field.value = String(value);
+	}
+}
+
+// Applies the open Settings dialog and lets its requests settle.
+async function apply(element) {
+	element('settings-form').listeners.submit({preventDefault() {}});
+	for (let i = 0; i < 3; ++i) await new Promise(setImmediate);
+}
+
+test('test_viewer_settings_defaults_for_native_reader', async () => {
+	const {element} = await viewer(true, {globals: capable, client: true});
+	settings(element);
+	assert.equal(element('settings-dialog').open, true);
+	assert.deepEqual(['server-tbf', 'server-pbf', 'server-type', 'browser-tbf', 'browser-pbf', 'browser-type']
+		.map(id => element(`settings-${id}`).value), ['32', '0', '0', '256', '256', '0']);
+	assert.equal(element('settings-browser-tbf').max, 768);
+});
+
+test('test_viewer_client_start_failure_reported', async () => {
+	const {element, context} = await viewer(true, {globals: capable, client: true});
+	vm.runInContext('client.message({type: "start-failed", message: "its decode threads did not start within 20 s"})', context);
+	assert.match(element('status').textContent, /decode threads did not start/);
+	assert.equal(element('cache-client-compressed').textContent, 'not running');
+	settings(element);
+	assert.equal(element('settings-browser-tbf').disabled, true);
+	assert.equal(element('settings-browser-tbf').title, 'not running');
+});
+
+test('test_viewer_settings_browser_disabled_without_client_build', async () => {
+	const {element} = await viewer(true, {globals: capable, client: false});
+	assert.equal(element('cache-client-compressed').textContent, 'no browser client');
+	settings(element);
+	assert.equal(element('settings-browser-pbf').disabled, true);
+	assert.equal(element('settings-browser-pbf').title, 'no browser client');
+	assert.equal(element('settings-server-tbf').disabled, false);
+});
+
+test('test_viewer_settings_saved_and_used_by_the_client', async () => {
+	const localStorage = storage();
+	const first = await viewer(true, {globals: {...capable, localStorage}, client: true});
+	settings(first.element, {'browser-tbf': 512, 'browser-type': 1, 'server-tbf': 64});
+	await apply(first.element);
+	assert.deepEqual(JSON.parse(localStorage.items['pyra.cacheSettings']),
+		{server: {tbf: 64, pbf: null, type: null}, browser: {tbf: 512, pbf: null, type: 1}});
+	const {element, context} = await viewer(true, {globals: {...capable, localStorage}, client: true});
+	assert.deepEqual(plain(vm.runInContext('[client.options.tbfMiB, client.options.pbfMiB, client.options.topology]', context)),
+		[512, 256, 1]);
+	settings(element);
+	assert.equal(element('settings-server-tbf').value, '64');
+});
+
+test('test_viewer_settings_server_pbf_follows_reader_unless_set', async () => {
+	const localStorage = storage();
+	const {element, context} = await viewer(true, {globals: {localStorage}});
+	const pbf = backend => vm.runInContext(`serverCacheOptions('${backend}').pbf_mib`, context);
+	assert.deepEqual([pbf('0'), pbf('1')], ['0', '32']);
+	settings(element);
+	await apply(element);
+	assert.deepEqual([pbf('0'), pbf('1')], ['0', '32']);
+	settings(element, {'server-pbf': 8});
+	await apply(element);
+	assert.deepEqual([pbf('0'), pbf('1')], ['8', '8']);
+});
+
+test('test_viewer_settings_size_change_reopens_the_image', async () => {
+	const {element, state} = await viewer(true, {globals: {localStorage: storage()}});
+	state.openOptions = {path: 'svs/a.svs', backend: '0', threads: '4', ...defaultCacheFields};
+	settings(element, {'server-tbf': 64, 'server-type': 1, 'server-reset-pbf': true});
+	await apply(element);
+	assert.equal(state.pendingOpen.reload, true);
+	assert.deepEqual(plain(state.pendingOpen.options), {path: 'svs/a.svs', backend: '0', threads: '4',
+		tbf_mib: '64', pbf_mib: '0', topology: '1'});
+	assert.equal(element('settings-dialog').open, false);
+});
+
+test('test_viewer_settings_reset_only_clears_in_place', async () => {
+	const {element, state, posted} = await viewer(true, {globals: {localStorage: storage()},
+		responses: {'/api/cache/clear': {freed: 1}}});
+	state.openOptions = {path: 'svs/a.svs', backend: '0', threads: '4', ...defaultCacheFields};
+	settings(element, {'server-reset-tbf': true, 'server-reset-pbf': true});
+	await apply(element);
+	assert.equal(state.pendingOpen, null);
+	assert.deepEqual(posted.filter(([route]) => route === '/api/cache/clear'), [['/api/cache/clear', {compressed: '1', decoded: '1'}]]);
+	assert.match(element('status').textContent, /Caches reset/);
+});
+
+test('test_viewer_settings_browser_reset_sent_to_client', async () => {
+	const sent = [];
+	const recording = {...capable, Worker: class { postMessage(message) { sent.push(message); } }};
+	const {element, context} = await viewer(true, {globals: {...recording, localStorage: storage()}, client: true});
+	vm.runInContext('client.message({type: "opened", generation: client.generation, composites: []})', context);
+	settings(element, {'browser-reset-pbf': true});
+	assert.equal(element('settings-browser-reset-pbf').disabled, false);
+	await apply(element);
+	assert.deepEqual(plain(sent.filter(message => message.type === 'clear')), [{type: 'clear', caches: 2}]);
+});
+
+test('test_viewer_settings_resets_need_an_open_image', async () => {
+	const {element, state} = await viewer(true, {globals: {localStorage: storage()}});
+	state.image = null;
+	settings(element);
+	assert.equal(element('settings-server-reset-tbf').disabled, true);
+	assert.match(element('settings-note').textContent, /next one/);
+});
+
+test('test_viewer_client_cache_rows_say_starting', async () => {
+	const {element} = await viewer(true, {globals: capable, client: true});
+	assert.equal(element('cache-client-decoded').textContent, 'starting…');
+});
+
+test('test_viewer_root_change_hidden_for_network_connection', async () => {
+	assert.equal((await viewer(true, {local: true})).element('change-root').hidden, false);
+	assert.equal((await viewer(true, {local: false})).element('change-root').hidden, true);
+});
+
+test('test_viewer_root_change_updates_label_and_slide_path', async () => {
+	const files = {path: '.', entries: [], truncated: false};
+	const {state, element, fetches} = await viewer(true, {responses: {
+		'/api/root': {root: 'D:/Data', slide: 'b/slide.dcm'}, '/api/files': files}});
+	state.openOptions = {path: 'Data/b/slide.dcm'};
+	element('change-root').listeners.click();
+	assert.equal(element('root-editor').hidden, false);
+	assert.equal(element('root-input').value, '/images');
+	element('root-input').value = ' D:/Data ';
+	element('set-root').listeners.click();
+	await new Promise(setImmediate);
+	assert.ok(fetches.includes('/api/root?path=D%3A%2FData'));
+	assert.equal(element('root-label').textContent, 'D:/Data');
+	assert.equal(state.openOptions.path, 'b/slide.dcm');
+	assert.equal(state.folder, '');
+	assert.equal(element('root-editor').hidden, true);
+});
+
+test('test_viewer_root_change_outside_slide_cannot_reload', async () => {
+	const {state, element} = await viewer(true, {responses: {
+		'/api/root': {root: 'E:/Other', slide: null}, '/api/files': {path: '.', entries: [], truncated: false}}});
+	state.openOptions = {path: 'b/slide.dcm'};
+	state.config.analyse = {available: true};
+	element('set-root').listeners.click();
+	await new Promise(setImmediate);
+	assert.equal(state.openOptions, null);
+	assert.equal(element('analyse').disabled, true);
+	assert.equal(element('analyse').title, 'Reopen this slide from the current image directory');
+});
+
+test('test_viewer_root_change_reports_unsaved', async () => {
+	const {element} = await viewer(true, {responses: {
+		'/api/root': {root: 'D:/Data', slide: null, saved: false, save_error: 'Cannot write x'},
+		'/api/files': {path: '.', entries: [], truncated: false}}});
+	element('set-root').listeners.click();
+	await new Promise(setImmediate);
+	assert.equal(element('open-error').textContent, 'Changed, but not kept for the next start: Cannot write x');
+});
+
+test('test_viewer_folder_error_names_stopped_server', async () => {
+	const {context, element} = await viewer();
+	context.fetch = async () => { throw new TypeError('Failed to fetch'); };
+	await vm.runInContext('showFolder("Philips")', context);
+	assert.match(element('open-error').textContent, /Cannot reach the viewer server/);
+});
+
+test('test_viewer_cache_shows_server_usage_and_percent', async () => {
+	const mib = 1024 * 1024;
+	const {element, refreshCache} = await viewer(true, {responses: {
+		'/api/cache': {compressed: {bytes: 8 * mib, cap: 32 * mib}, decoded: {bytes: 0, cap: 0},
+			tiles: {read: 1234, served: 5600, served_bytes: 40 * mib}}}});
+	await refreshCache();
+	assert.equal(element('cache-server-compressed').textContent, '8.0 / 32 MiB · 25% full');
+	assert.equal(element('tiles-read').textContent, '1,234');
+	assert.equal(element('transfer').textContent, '5,600 tiles · 40.0 MiB');
+});
+
+test('test_viewer_cache_off_and_no_client_rows', async () => {
+	const mib = 1024 * 1024;
+	const {element, refreshCache} = await viewer(true, {responses: {
+		'/api/cache': {compressed: {bytes: 0, cap: 32 * mib}, decoded: {bytes: 0, cap: 0},
+			tiles: {read: 12, served: 0, served_bytes: 0}}}});
+	await refreshCache();
+	assert.equal(element('transfer').textContent, '0 tiles · 0.0 MiB');
+	assert.equal(element('cache-server-decoded').textContent, 'off');
+	assert.equal(element('cache-client-compressed').textContent, 'no browser client');
+});
+
+test('test_viewer_cache_marks_tiles_sent_past_the_cache', async () => {
+	const mib = 1024 * 1024;
+	const {element, refreshCache} = await viewer(true, {responses: {
+		'/api/cache': {compressed: {bytes: 32 * mib, cap: 32 * mib, bypassed: 7}, decoded: {bytes: 0, cap: 0}}}});
+	await refreshCache();
+	const compressed = element('cache-server-compressed');
+	assert.equal(compressed.textContent, '32 / 32 MiB · 100% full · 7 bypassed');
+	assert.ok(compressed.classes.has('bypassed'));
+	assert.match(compressed.title, /7 tiles were sent past this cache/);
+});
+
+test('test_viewer_cache_shows_hit_ratio', async () => {
+	const mib = 1024 * 1024;
+	const {element, refreshCache} = await viewer(true, {responses: {
+		'/api/cache': {compressed: {bytes: 8 * mib, cap: 32 * mib, hits: 997, misses: 3},
+			decoded: {bytes: 0, cap: 32 * mib, hits: 0, misses: 0}}}});
+	await refreshCache();
+	const compressed = element('cache-server-compressed');
+	assert.equal(compressed.textContent, '8.0 / 32 MiB · 25% full · 99.7% hits');
+	assert.equal(compressed.title, '997 hits, 3 misses since the image was opened.');
+	assert.equal(element('cache-server-decoded').textContent, '0.0 / 32 MiB · 0% full');
+});
+
+test('test_viewer_cache_shows_tiles_held_and_average_size', async () => {
+	const mib = 1024 * 1024;
+	const {element, refreshCache} = await viewer(true, {responses: {
+		'/api/cache': {compressed: {bytes: 32 * mib, cap: 32 * mib, held: 448, hits: 0, misses: 935},
+			decoded: {bytes: 0, cap: 0, held: 0, hits: 0, misses: 0}}}});
+	await refreshCache();
+	const compressed = element('cache-server-compressed');
+	assert.equal(compressed.textContent, '32 / 32 MiB · 448 tiles · 100% full · 0.0% hits');
+	assert.equal(compressed.title, '448 tiles of 73.1 KiB on average, each stored at its own size. ' +
+		'0 hits, 935 misses since the image was opened.');
+	assert.equal(element('cache-server-decoded').textContent, 'off');
+});
+
+test('test_viewer_cache_hit_ratio_never_rounds_a_miss_to_100', async () => {
+	const mib = 1024 * 1024;
+	const {element, refreshCache} = await viewer(true, {responses: {
+		'/api/cache': {compressed: {bytes: 8 * mib, cap: 32 * mib, hits: 99999, misses: 1}, decoded: {bytes: 0, cap: 0}}}});
+	await refreshCache();
+	assert.equal(element('cache-server-compressed').textContent, '8.0 / 32 MiB · 25% full · 99.9% hits');
+});
+
+test('test_viewer_cache_shows_browser_hit_ratio', async () => {
+	const mib = 1024 * 1024;
+	const {element, context} = await viewer(true, {globals: capable, client: true});
+	vm.runInContext('client.message({type: "opened", generation: client.generation, composites: []})', context);
+	context.message = {type: 'cache', compressed: {bytes: 4 * mib, cap: 256 * mib, hits: 1, misses: 3},
+		decoded: {bytes: 64 * mib, cap: 256 * mib, hits: 30, misses: 10}};
+	vm.runInContext('client.message({...message, generation: client.generation})', context);
+	assert.equal(element('cache-client-compressed').textContent, '4.0 / 256 MiB · 2% full · 25.0% hits');
+	assert.equal(element('cache-client-decoded').textContent, '64 / 256 MiB · 25% full · 75.0% hits');
+});
+
+test('test_viewer_cache_keeps_values_while_server_busy', async () => {
+	const {element, refreshCache} = await viewer(true, {responses: {'/api/cache': {busy: true}}});
+	element('cache-server-compressed').textContent = '1.0 / 32 MiB · 3% full';
+	await refreshCache();
+	assert.equal(element('cache-server-compressed').textContent, '1.0 / 32 MiB · 3% full');
+});
+
+test('test_viewer_overview_from_server_after_client_failure', async () => {
+	const {state, context} = await viewer(true, {globals: capable, client: true});
+	vm.runInContext('client.message({type: "opened", generation: client.generation, composites: []})', context);
+	state.pendingOverview = null;
+	vm.runInContext(`client.message({type: "error", generation: client.generation, plane: ${state.plane.index},
+		display: false, lane: "overview", message: "vector"})`, context);
+	assert.equal(state.pendingOverview?.overview, 1);
+	assert.equal(state.pendingOverview?.plane, state.plane.index);
 });

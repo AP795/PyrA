@@ -25,7 +25,7 @@ constexpr auto kPbfColor = "#2e7d32";
 CacheUsageWidget::CacheUsageWidget ( QWidget *parent ) : QWidget( parent )
 {
 	setAccessibleName( tr( "Pyramid cache occupancy" ) );
-	setToolTip( tr( "Occupied slots divided by currently allocated slots. Arena covers the whole pyramid; Level shows the level used by the last main-view render. Pools may grow up to their configured memory limits. Synthetic levels have no tile cache." ) );
+	setToolTip( tr( "TBF: compressed bytes held against the TBF budget, for the whole slide; each tile is stored at its own size. PBF: occupied slots divided by currently allocated slots; Arena covers the whole pyramid, Level shows the level used by the last main-view render. Pools may grow up to their configured memory limits. Synthetic levels have no tile cache." ) );
 	setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Fixed );
 	auto *layout = new QVBoxLayout( this );
 	const auto inset = fontMetrics().horizontalAdvance( QLatin1Char( 'M' ) );
@@ -66,6 +66,28 @@ void CacheUsageWidget::set_usage ( const CacheUsage &usage )
 		else if (usage.options.backend == PYRA_BACKEND_OPENSLIDE)
 			state = decoded ? tr( "%1 MiB capacity (OpenSlide); occupancy unavailable" )
 				.arg( QLocale{}.toString( double( limit ) / kBytesPerMiB, 'g', 6 ) ) : tr( "unavailable (OpenSlide)" );
+		else if (!decoded) {
+//
+// A compressed tile is stored at its own size, so a free slot holds nothing and
+// slot counts say nothing about memory: the row is the bytes held against the
+// budget, for the whole slide whatever the topology.
+			const auto &stats = usage.stats;
+			if (!stats || stats->compressed_cache_used_bytes == PYRA_STAT_UNAVAILABLE ||
+				stats->compressed_cache_tiles == PYRA_STAT_UNAVAILABLE)
+				state = tr( "unavailable" );
+			else {
+				const auto locale = QLocale{};
+				const auto used = stats->compressed_cache_used_bytes;
+				state = tr( "%1 tiles in %2 / %3 MiB" ).arg( locale.toString( qulonglong( stats->compressed_cache_tiles ) ),
+					locale.toString( double( used ) / kBytesPerMiB, 'f', 1 ),
+					locale.toString( double( limit ) / kBytesPerMiB, 'g', 6 ) );
+				if (limit > 0) {
+					const auto fraction = std::clamp( double( used ) / double( limit ), 0.0, 1.0 );
+					bar->setValue( int( std::lround( fraction * kBarSteps ) ) );
+					state += tr( " (%1%)" ).arg( locale.toString( 100.0 * fraction, 'f', 1 ) );
+				}
+			}
+		}
 		else if (!usage.occupancy)
 			state = tr( "unavailable" );
 		else {
@@ -90,7 +112,9 @@ void CacheUsageWidget::set_usage ( const CacheUsage &usage )
 			}
 		}
 		auto scope = QString{};
-		if (usage.occupancy) {
+		if (!decoded && usage.image_open && usage.stats)
+			scope = tr( "all levels" );
+		else if (decoded && usage.occupancy) {
 			const auto &counts = *usage.occupancy;
 			scope = counts.topology == PYRA_CACHE_ARENA ? tr( "Arena" ) :
 				( counts.level_index >= 0 ? tr( "Level %1" ).arg( counts.level_index ) : tr( "Level" ) );

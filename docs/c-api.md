@@ -350,8 +350,42 @@ The hit ratio is hits / (hits + misses); no lookups means no ratio. Decoded hits
 bypass compressed lookups. Disabled decoded caching, synthetic rasters, sparse
 absent tiles and reusable assembled frames do not cause decoded-cache lookups;
 synthetic/absent tiles and reusable frames also bypass compressed lookups.
+`pyra_read_encoded_tile` is a compressed lookup too: it copies a cached tile
+(a hit) or loads it into the cache first (a miss), so serving tiles fills the
+TBF like rendering them. When no room can be made (a budget smaller than the
+tile, or the budget held by tiles in use) it reads the file past the
+cache and counts `compressed_cache_bypasses` (each also a miss; the first per
+slide is logged): non-zero means the compressed budget is too small for the
+workflow. `source_tile_reads` counts the stored tiles read from the source
+(the file; for a remote slide, the bytes put into it), into the cache or past
+it; a hit reads nothing, and sparse tiles and synthetic levels are not counted.
 Opening/overview work counts, so subtract snapshots to measure only a replay.
 OpenSlide returns `PYRA_STAT_UNAVAILABLE` for all four counters.
+
+`compressed_cache_bytes` and `decoded_cache_bytes` count the storage the caches
+have allocated. The compressed cache stores each tile at its own encoded size and
+allocates nothing ahead, so its allocated and used bytes are equal: the tiles'
+own bytes. Decoded pools grow many slots at a time and keep freed slots for
+reuse, so in per-level topology `decoded_cache_bytes` can sit near the budget
+while few tiles are held. `compressed_cache_used_bytes` and
+`decoded_cache_used_bytes` count the bytes holding a tile: what the caches hold,
+in either topology. For OpenSlide they equal the allocated fields.
+`compressed_cache_tiles` and `decoded_cache_tiles` count the tiles held
+(`PYRA_STAT_UNAVAILABLE` for OpenSlide). Compressed used bytes / tiles is the
+average encoded tile; decoded used bytes / tiles is the decoded slot size.
+When the compressed budget is full, the oldest unpinned tiles are freed in one
+batch of at least 1/32 of the bytes held, so finding them costs one scan per
+batch rather than per tile.
+
+`pyra_clear_cache(wsi, caches, &freed_bytes, &error)` empties the slide's
+compressed and/or decoded tile caches (`PYRA_CACHE_COMPRESSED`,
+`PYRA_CACHE_DECODED`, combined with `|`) and frees their storage, as if the
+slide had just been opened: the next read of a tile misses. The cleared caches'
+lookup counters restart at zero (hits, misses, and for the compressed cache
+bypasses); `source_tile_reads` keeps counting. `freed_bytes` may be null. Renders
+and tile reads hold the context's lock, so none is in flight while it runs.
+Another handle sharing the same source in the context is emptied too. OpenSlide
+returns `PYRA_UNSUPPORTED`; no flag, or an unknown one, `PYRA_INVALID_ARGUMENT`.
 
 `pyra_get_cache_usage(wsi, level_index, &usage, &error)` reports occupied and
 currently allocated TBF/PBF slot counts for one WSI. Initialize `usage.struct_size`.
@@ -360,6 +394,9 @@ Pass -1 for the last render's level, or a previously returned index to query tha
 level explicitly. Arena mode always counts the whole WSI's arena; Level mode
 counts only the selected level's pools. The denominator is allocated slots,
 including free reusable slots, rather than the configured maximum memory budget.
+A free compressed slot holds no bytes (compressed tiles are allocated at their
+own size), so for the TBF only the used count measures storage; its bytes are
+in `pyra_context_stats`.
 Before rendering, Level mode has level_index -1 and no selected pool. Synthetic
 levels own their pixels and have no tile-cache pools; `synthetic_level` identifies
 them. OpenSlide returns `PYRA_UNSUPPORTED`. The query uses pool counters rather

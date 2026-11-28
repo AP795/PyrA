@@ -11,34 +11,45 @@ foreach(httplib_file httplib.h LICENSE)
 	endif()
 endforeach()
 
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS index.html viewer.css viewer.js client_worker.js)
+set(pyra_pvue_web "${PROJECT_SOURCE_DIR}/Pvue/web")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS index.html viewer.css viewer.js
+	"${pyra_pvue_web}/pvue_view.js" "${pyra_pvue_web}/pvue_worker.js")
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/index.html" PYRA_WEB_HTML)
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/viewer.css" PYRA_WEB_CSS)
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/viewer.js" PYRA_WEB_JS)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/client_worker.js" PYRA_WEB_WORKER_JS)
+file(READ "${pyra_pvue_web}/pvue_view.js" PYRA_WEB_PVUE_JS)
+file(READ "${pyra_pvue_web}/pvue_worker.js" PYRA_WEB_WORKER_JS)
 configure_file(web_assets.h.in "${CMAKE_CURRENT_BINARY_DIR}/web_assets.h" @ONLY)
 
 add_library(pyra_web_support STATIC web_server.cpp web_analyse.cpp)
 
-# The browser client: the output directory of an Emscripten build of ViewW/wasm
-# (see README). When set, the viewer embeds it and renders in the browser from
-# stored tiles; otherwise every view is rendered by the server.
-set(PYRA_WEB_CLIENT_DIR "" CACHE PATH "Directory holding pyra_client.js and pyra_client.wasm to embed")
+# The browser client: the output directory of an Emscripten build of Pvue/wasm
+# (see Pvue/README.md). When set, the viewer embeds it and renders in the browser
+# from stored tiles; otherwise every view is rendered by the server.
+set(PYRA_WEB_CLIENT_DIR "" CACHE PATH "Directory holding pvue_client.js and pvue_client.wasm to embed")
 if(PYRA_WEB_CLIENT_DIR)
-	foreach(client_file pyra_client.js pyra_client.wasm)
+	foreach(client_file pvue_client.js pvue_client.wasm)
 		if(NOT EXISTS "${PYRA_WEB_CLIENT_DIR}/${client_file}")
 			message(FATAL_ERROR "Missing ${client_file} in PYRA_WEB_CLIENT_DIR=${PYRA_WEB_CLIENT_DIR}")
 		endif()
 	endforeach()
-	set(pyra_client_source "${CMAKE_CURRENT_BINARY_DIR}/web_client_assets.cpp")
-	add_custom_command(OUTPUT "${pyra_client_source}"
-		COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${pyra_client_source}" "-DJS=${PYRA_WEB_CLIENT_DIR}/pyra_client.js"
-			"-DWASM=${PYRA_WEB_CLIENT_DIR}/pyra_client.wasm" -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_client.cmake"
-		DEPENDS "${PYRA_WEB_CLIENT_DIR}/pyra_client.js" "${PYRA_WEB_CLIENT_DIR}/pyra_client.wasm"
+	set(pvue_client_source "${CMAKE_CURRENT_BINARY_DIR}/web_client_assets.cpp")
+	add_custom_command(OUTPUT "${pvue_client_source}"
+		COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${pvue_client_source}" "-DJS=${PYRA_WEB_CLIENT_DIR}/pvue_client.js"
+			"-DWASM=${PYRA_WEB_CLIENT_DIR}/pvue_client.wasm" -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_client.cmake"
+		DEPENDS "${PYRA_WEB_CLIENT_DIR}/pvue_client.js" "${PYRA_WEB_CLIENT_DIR}/pvue_client.wasm"
 			"${CMAKE_CURRENT_SOURCE_DIR}/embed_client.cmake"
 		COMMENT "Embedding the browser client")
-	target_sources(pyra_web_support PRIVATE "${pyra_client_source}")
+	target_sources(pyra_web_support PRIVATE "${pvue_client_source}")
 	target_compile_definitions(pyra_web_support PRIVATE PYRA_WEB_WITH_CLIENT=1)
+# No native build rebuilds the client: every build warns when it is older than
+# the sources it is built from (ViewW/check_client.cmake).
+	add_custom_target(pyra_web_client_check
+		COMMAND "${CMAKE_COMMAND}" "-DCLIENT_DIR=${PYRA_WEB_CLIENT_DIR}" "-DSOURCE_DIR=${Pyra_SOURCE_DIR}"
+			-P "${CMAKE_CURRENT_SOURCE_DIR}/check_client.cmake"
+		COMMENT "Checking the browser client is current"
+		VERBATIM)
+	add_dependencies(pyra_web_support pyra_web_client_check)
 # Notices of what the client bundles beyond this build's own codecs (JPEG XL).
 	if(IS_DIRECTORY "${PYRA_WEB_CLIENT_DIR}/third-party")
 		install(DIRECTORY "${PYRA_WEB_CLIENT_DIR}/third-party/" DESTINATION "${pyra_notice_destination}")
@@ -46,7 +57,7 @@ if(PYRA_WEB_CLIENT_DIR)
 else()
 	target_compile_definitions(pyra_web_support PRIVATE PYRA_WEB_WITH_CLIENT=0)
 endif()
-target_link_libraries(pyra_web_support PUBLIC Pyra::pyra Threads::Threads)
+target_link_libraries(pyra_web_support PUBLIC pyra_pvue Pyra::pyra Threads::Threads)
 target_include_directories(pyra_web_support PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
 	PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(pyra_web_support SYSTEM PRIVATE "${PYRA_HTTPLIB_DIR}")

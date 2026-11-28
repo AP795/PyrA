@@ -40,6 +40,8 @@ public:
 	bool start ( const httplib::Request &request, const std::filesystem::path &slide,
 		const std::string &relative, std::string *body );
 	std::string status_json () const;
+// A run is going: its paths are relative to the image root.
+	bool running () const;
 
 private:
 	struct Impl;

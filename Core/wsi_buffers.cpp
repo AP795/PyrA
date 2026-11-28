@@ -20,6 +20,14 @@ namespace {
 // is quadratic and stays invisible until a request needs thousands of slots.
 // The budget clamps this afterwards; it does not set it.
 inline constexpr int kPoolGrowthPercent = 50;
+//
+// A variable-size (compressed) eviction frees at least this fraction of the
+// bytes held, oldest entries first, in one scan. Finding the oldest entry scans
+// every entry, and exact-size entries are numerous - tens of thousands of NDPI
+// strips in a large budget - so one scan per evicted tile would cost more than
+// the tile's decode. Freeing 1/kEvictBatchDivisor at once makes the scan's cost
+// per evicted tile constant, for about that much budget left idle.
+inline constexpr size_t kEvictBatchDivisor = 32;
 
 
 size_t decoded_slot_bytes ( const Level &level )
@@ -47,17 +55,19 @@ int clamp_slot_count ( size_t count )
 
 // Size pool `pool_no` of one kind if it is not yet. PerPyramid: the single pool
 // gets a slot fitting the largest tile of any backed level. PerLevel: the level's
-// own tile. Synthetic levels own their pixels and get no slots.
+// own tile. Synthetic levels own their pixels and get no slots. Compressed pools
+// are variable-size, and their slot size is only the largest entry accepted.
 void ConfigurePool ( const Ppyr &pyramid, BufferPool &pool, bool decoded, int pool_no )
 {
 	if (pool.slot_bytes() != 0)
 		return;
+	const auto variable = !decoded;
 	if (pyramid.cache_topology == CacheTopology::PerLevel) {
 		if (pool_no >= (int)pyramid.levels.size())
 			return;
 		const auto &level = pyramid.levels[pool_no];
 		if (!level.synthetic)
-			pool.init( level_slot_bytes( level, decoded ), clamp_slot_count( level.tiles.size() ) );
+			pool.init( level_slot_bytes( level, decoded ), clamp_slot_count( level.tiles.size() ), variable );
 		return;
 	}
 	auto bytes = size_t{ 0 };
@@ -68,7 +78,7 @@ void ConfigurePool ( const Ppyr &pyramid, BufferPool &pool, bool decoded, int po
 		count += level.tiles.size();
 		bytes = std::max( bytes, level_slot_bytes( level, decoded ) );
 	}
-	pool.init( bytes, clamp_slot_count( count ) );
+	pool.init( bytes, clamp_slot_count( count ), variable );
 }
 
 
@@ -173,6 +183,54 @@ bool EvictBufferSlot ( Ppyr &pyramid, bool decoded, int reuse_level )
 		return true;
 	}
 	return false;
+}
+
+
+// Variable-size kinds: free the oldest unpinned entries until at least
+// `bytes_wanted`, and at least 1/kEvictBatchDivisor of what the kind holds, is
+// released. False when nothing could be freed. One scan collects candidates;
+// each is re-checked under its pool's locks before release, since another
+// thread may have pinned, used or replaced it after the scan.
+bool EvictOldestBatch ( Ppyr &pyramid, bool decoded, size_t bytes_wanted )
+{
+	auto &kind = cache_kind( pyramid, decoded );
+	auto candidates = std::vector<EvictionCandidate>{};
+	for (auto pi = 0; pi < (int)kind.pools.size(); ++pi) {
+		std::scoped_lock pool_guard( *pyramid.tbf.locks[pi], *pyramid.pxb.locks[pi] );
+		const auto &pool = kind.pools[pi];
+		for (auto si = 0; si < pool.num_slots; ++si) {
+			const auto &owner = pool.tpos[si];
+			if (owner.tile_no < 0)
+				continue;
+			const auto &tile = pyramid.levels[owner.level_no].tiles[owner.tile_no];
+			if (evictable( tile ))
+				candidates.push_back( { pi, si, owner, tile.last_use.load( std::memory_order_relaxed ) } );
+		}
+	}
+	const auto target = (std::max)( bytes_wanted, kind.allocated_bytes() / kEvictBatchDivisor );
+	std::sort( candidates.begin(), candidates.end(), [] ( const auto &a, const auto &b ) {
+		return a.last_use < b.last_use;
+	} );
+	auto freed = size_t{ 0 };
+	for (const auto &candidate : candidates) {
+		if (freed >= target)
+			break;
+		std::scoped_lock pool_guard( *pyramid.tbf.locks[candidate.pool_no],
+			*pyramid.pxb.locks[candidate.pool_no] );
+		auto &pool = kind.pools[candidate.pool_no];
+		if (candidate.slot >= pool.num_slots)
+			continue;
+		const auto &owner = pool.tpos[candidate.slot];
+		if (owner.level_no != candidate.owner.level_no || owner.tile_no != candidate.owner.tile_no)
+			continue;
+		auto &tile = pyramid.levels[owner.level_no].tiles[owner.tile_no];
+		if (!evictable( tile ) || tile.last_use.load( std::memory_order_relaxed ) != candidate.last_use)
+			continue;
+		freed += pool.entry_bytes( candidate.slot );
+		pool.release( candidate.slot );
+		forget_entry( tile, decoded );
+	}
+	return freed > 0;
 }
 
 
@@ -293,19 +351,37 @@ bool WsiLoader::EvictPixBf ( Ppyr &pyramid, int reuse_level )
 
 
 int WsiLoader::AcquireBufferSlot ( Ppyr &pyramid, int level_no,
-	int tile_no, bool decoded )
+	int tile_no, bool decoded, size_t bytes )
 {
 	auto &kind = cache_kind( pyramid, decoded );
 	auto initial_bytes = decoded ? pyramid.pxb_init_bytes : pyramid.tbf_init_bytes;
+	auto record_peak = [&] {
+		auto &peak = decoded ? pyramid.stats.peak_pixbf_used_slots
+			: pyramid.stats.peak_tilebf_used_slots;
+		peak = std::max( peak, (uint32_t)kind.used_slots() );
+	};
 	while (true) {
+		auto variable = false;
 		{
 			std::unique_lock pool_guard( cache_lock( pyramid, decoded, level_no ) );
 			auto &pool = cache_pool( pyramid, decoded, level_no );
 			ConfigurePool( pyramid, pool, decoded, cache_pool_index( pyramid, level_no ) );
 			if (pool.slot_bytes() == 0)
 				return -1;
-			auto slot = pool.acquire( level_no, tile_no );
-			if (slot >= 0) {
+//
+// Variable size: the entry is exactly `bytes`, so the budget is asked for that
+// and nothing more; when it refuses, the oldest entries make room.
+			variable = pool.variable();
+			if (variable) {
+				if (bytes == 0 || bytes > pool.slot_bytes())
+					return -1;
+				if (GrowthBudget( pyramid, level_no, decoded, bytes ) >= bytes) {
+					const auto slot = pool.acquire( level_no, tile_no, bytes );
+					if (slot >= 0)
+						record_peak();
+					return slot;
+				}
+			} else if (auto slot = pool.acquire( level_no, tile_no ); slot >= 0) {
 				if (decoded) {
 					const auto &level = pyramid.levels[level_no];
 // Begin the new occupant's trivial pixel lifetimes, including when a slot
@@ -316,12 +392,9 @@ int WsiLoader::AcquireBufferSlot ( Ppyr &pyramid, int level_no,
 							(size_t)level.tile_w * (size_t)level.tile_h );
 					} );
 				}
-				auto &peak = decoded ? pyramid.stats.peak_pixbf_used_slots
-					: pyramid.stats.peak_tilebf_used_slots;
-				peak = std::max( peak, (uint32_t)kind.used_slots() );
+				record_peak();
 				return slot;
-			}
-			if (pool.can_grow()) {
+			} else if (pool.can_grow()) {
 				auto remaining = (size_t)( pool.max_slots - pool.num_slots );
 				auto grow = pool.num_slots == 0
 					? std::max<size_t>( 1, initial_bytes / pool.slot_bytes() )
@@ -334,16 +407,27 @@ int WsiLoader::AcquireBufferSlot ( Ppyr &pyramid, int level_no,
 			}
 		}
 // Release the pool lock before eviction takes both kinds' locks.
-		if (!( decoded ? EvictPixBf( pyramid, level_no ) : EvictTileBf( pyramid, level_no ) ))
+		const auto freed = variable ? EvictOldestBatch( pyramid, decoded, bytes )
+			: decoded ? EvictPixBf( pyramid, level_no ) : EvictTileBf( pyramid, level_no );
+		if (!freed)
 			return -1;
 	}
 }
 
 
-int WsiLoader::AcquireTileBfSlot ( Ppyr &pyramid, int level_no, int tile_no )
+int WsiLoader::AcquireTileBfSlot ( Ppyr &pyramid, int level_no, int tile_no, size_t bytes )
 {
 	std::unique_lock alloc_guard( tilebf_alloc_mtx_ );
-	return AcquireBufferSlot( pyramid, level_no, tile_no, false );
+	return AcquireBufferSlot( pyramid, level_no, tile_no, false, bytes );
+}
+
+
+uint8_t *compressed_tile_scratch ( size_t bytes )
+{
+	thread_local auto scratch = std::vector<uint8_t>{};
+	if (scratch.size() < bytes)
+		scratch.resize( bytes );
+	return scratch.data();
 }
 
 

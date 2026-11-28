@@ -7,7 +7,10 @@
 // WsiLoader::Generate (what pyra_get_image calls) and splits each frame with
 // the core's own PpyrStats timers. Not a CTest.
 //
-// usage: pyra_native_profile <slide> [scale]
+// usage: pyra_native_profile <slide> [scale] [tbf_mib] [pxb_mib]
+//
+// A small tbf_mib/pxb_mib forces steady-state eviction: the churn case where
+// cache bookkeeping, not decode, can dominate.
 
 #include "wsi.h"
 
@@ -117,7 +120,8 @@ std::vector<Frame> pass ( priml::WsiLoader &loader, priml::Ppyr &pyramid,
 }
 
 
-void report ( const std::string &name, const std::vector<Frame> &frames )
+void report ( const std::string &name, const std::vector<Frame> &frames,
+	const priml::Ppyr &pyramid, const priml::PpyrStats &before )
 {
 	auto pick = [&] ( double Frame::*field ) {
 		auto values = std::vector<double>{};
@@ -140,6 +144,22 @@ void report ( const std::string &name, const std::vector<Frame> &frames )
 	std::cout << std::format( "    sample to request (rest) {:8.3f}\n", total - span );
 	std::cout << std::format( "  C API row copy-out        {:8.3f}\n", pick( &Frame::copy_out ) );
 	std::cout << std::format( "  tiles/frame {} for a {}x{} view\n", frames.front().tiles, kViewWidth, kViewHeight );
+	auto pass_ms = 0.0;
+	for (const auto &frame : frames)
+		pass_ms += frame.total;
+	const auto &after = pyramid.stats;
+	const auto held = pyramid.tbf.used_slots();
+	const auto held_bytes = pyramid.tbf.used_bytes();
+	constexpr auto kMiB = 1024.0 * 1024.0;
+	std::cout << std::format( "  pass total {:.1f} ms; source tile reads {}; TBF hits {} misses {}; PBF hits {} misses {}; incomplete {}\n",
+		pass_ms, after.tile_loads - before.tile_loads,
+		after.compressed_cache_hits - before.compressed_cache_hits,
+		after.compressed_cache_misses - before.compressed_cache_misses,
+		after.decoded_cache_hits - before.decoded_cache_hits,
+		after.decoded_cache_misses - before.decoded_cache_misses,
+		after.incomplete_renders - before.incomplete_renders );
+	std::cout << std::format( "  TBF holds {} tiles in {:.2f} MiB ({:.1f} KiB each), allocated {:.2f} MiB\n",
+		held, held_bytes / kMiB, held ? held_bytes / 1024.0 / held : 0.0, pyramid.tbf.allocated_bytes() / kMiB );
 }
 
 
@@ -163,15 +183,18 @@ double allocation_ms ( int w, int h )
 int main ( int argc, char **argv )
 {
 	try {
-		require( argc >= 2, "usage: pyra_native_profile <slide> [scale]" );
+		require( argc >= 2, "usage: pyra_native_profile <slide> [scale] [tbf_mib] [pxb_mib]" );
 		const auto path = std::string( argv[1] );
 		const auto scale = argc >= 3 ? std::stof( argv[2] ) : 1.0f;
+		auto mib_arg = [&] ( int index ) {
+			return argc > index ? (size_t)std::stoull( argv[index] ) * 1024 * 1024 : kCacheBytes;
+		};
 		auto pyramid = priml::Ppyr{};
 // The C API's settings for a 256 MiB / 256 MiB / one-thread context.
 		pyramid.decode_threads = 1;
 		pyramid.ram_cap_bytes = 0;
-		pyramid.tbf_cap_bytes = kCacheBytes;
-		pyramid.pxb_cap_bytes = kCacheBytes;
+		pyramid.tbf_cap_bytes = mib_arg( 3 );
+		pyramid.pxb_cap_bytes = mib_arg( 4 );
 		pyramid.use_pixbf = true;
 		pyramid.cache_growth_budget = [] ( bool, size_t wanted ) { return wanted; };
 		auto loader = priml::WsiLoader::Create( path );
@@ -192,9 +215,13 @@ int main ( int argc, char **argv )
 				rung.metric / level.metric, rung.bounds.br.x - rung.bounds.tl.x,
 				rung.bounds.br.y - rung.bounds.tl.y, rung.tile_w, rung.tile_h, rung.tiles.size() );
 		}
-		report( "pass 1 (cold decoded cache)", pass( *loader, pyramid, plane, mpp, rects ) );
+		std::cout << std::format( "caches: TBF {} MiB, PBF {} MiB\n", pyramid.tbf_cap_bytes >> 20, pyramid.pxb_cap_bytes >> 20 );
+		auto before = pyramid.stats;
+		const auto cold = pass( *loader, pyramid, plane, mpp, rects );
+		report( "pass 1 (cold decoded cache)", cold, pyramid, before );
+		before = pyramid.stats;
 		const auto warm = pass( *loader, pyramid, plane, mpp, rects );
-		report( "pass 2 (warm, as the replay)", warm );
+		report( "pass 2 (warm, as the replay)", warm, pyramid, before );
 		std::cout << std::format( "\nreference: fresh zero-filled Pwhl, 2x view {:8.3f} ms, view {:8.3f} ms\n",
 			allocation_ms( 2 * kViewWidth, kViewHeight ), allocation_ms( kViewWidth, kViewHeight ) );
 // The frame this scale reads: first touch of fresh memory against a rewrite of

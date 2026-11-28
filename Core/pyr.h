@@ -625,9 +625,16 @@ struct PpyrStats {
 	int last_render_level = -1;
 	uint64_t compressed_cache_hits = 0;
 	uint64_t compressed_cache_misses = 0;
+// Encoded-tile reads (served tiles, exports) that found no compressed slot to
+// load into and read the file past the cache; each is also a miss. Non-zero
+// means the compressed budget is too small for the workflow.
+	uint64_t compressed_cache_bypasses = 0;
 	uint64_t decoded_cache_hits = 0;
 	uint64_t decoded_cache_misses = 0;
 	uint64_t requested_tiles = 0;
+// Stored tiles read from the source (the file; for a remote slide, the bytes the
+// server sent): into the compressed cache, or past it (a bypass). Sparse tiles
+// and synthetic levels read nothing and are not counted.
 	uint64_t tile_loads = 0;
 	uint64_t decoded_tiles = 0;
 	uint64_t renders = 0;
@@ -987,6 +994,11 @@ size_t release_unused_cache ( Ppyr &pyramid, bool decoded );
 // flight, and free their storage: an idle slide giving memory back to its owner.
 // Returns the bytes freed.
 size_t reclaim_idle_cache ( Ppyr &pyramid, bool decoded );
+
+// This thread's buffer for assembling one compressed tile, at least `bytes`
+// long and kept for the next tile. A tile's exact size is only known once it is
+// assembled; it is then copied into a compressed-cache entry of that size.
+uint8_t *compressed_tile_scratch ( size_t bytes );
 
 
 // The resolution ladder of one plane, finest first.

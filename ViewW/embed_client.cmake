@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 # Writes OUTPUT, a C++ source holding the browser client (JS and WASM files of
-# an Emscripten build of ViewW/wasm) as byte arrays, so the viewer stays one
+# an Emscripten build of Pvue/wasm) as byte arrays, so the viewer stays one
 # self-contained executable. Run with cmake -P, passing OUTPUT, JS and WASM.
 
 function(pyra_embed_bytes variable path name)

@@ -23,7 +23,6 @@
 namespace priml {
 
 constexpr uint32_t NDPI_SOURCELENS = 65421;
-constexpr uint32_t NDPI_STRIPOFFSETS = 65426;
 constexpr uint32_t NDPI_REFERENCE = 65427;	// operator/scanner slide reference (barcode text)
 
 

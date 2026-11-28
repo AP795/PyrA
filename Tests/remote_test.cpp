@@ -15,11 +15,13 @@
 #include <pyra/pyra.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -38,6 +40,9 @@ constexpr auto kMissingBatch = size_t{ 64 };
 // view whose tiles exceed the cache can never complete; real slides with
 // uncompressed CZI sub-blocks need more than the library default to hold one.
 constexpr auto kCacheBytes = uint64_t{ 256 } << 20;
+constexpr auto kSmallCacheBytes = uint64_t{ 1 } << 20;
+// Smaller than one compressed slot: no tile can be cached.
+constexpr auto kSlotlessCacheBytes = uint64_t{ 1 } << 10;
 
 void require ( bool condition, const std::string &message )
 {
@@ -56,10 +61,11 @@ std::string utf8 ( const std::filesystem::path &path )
 struct Context {
 	pyra_context *value_ = nullptr;
 
-	Context () {
+	explicit Context ( uint64_t compressed_cache_bytes = kCacheBytes, pyra_cache_topology topology = PYRA_CACHE_ARENA ) {
 		auto options = pyra_context_options{};
 		pyra_context_options_init( &options );
-		options.compressed_cache_bytes = kCacheBytes;
+		options.compressed_cache_bytes = compressed_cache_bytes;
+		options.cache_topology = topology;
 		options.decoded_cache_bytes = kCacheBytes;
 		auto error = pyra_error{};
 		require( pyra_context_create( &options, &value_, &error ) == PYRA_OK, error.message );
@@ -319,6 +325,220 @@ void test_remote_put_rejects_oversize ( const std::filesystem::path &path )
 }
 
 
+pyra_context_stats context_stats ( Context &context )
+{
+	auto stats = pyra_context_stats{};
+	stats.struct_size = sizeof( stats );
+	auto error = pyra_error{};
+	require( pyra_context_get_stats( context.value_, &stats, &error ) == PYRA_OK, error.message );
+	return stats;
+}
+
+
+// A served tile goes through the compressed cache: the first read loads it into
+// a slot (a miss), the next is copied from that slot (a hit), same bytes. The
+// cache is small so that tile 0, which opening read first to build the coarse
+// levels, has been evicted by the tiles read after it; the cache is full, so
+// its allocated bytes do not move and the second read's hit is the evidence.
+void test_remote_served_tile_cached ( const std::filesystem::path &path )
+{
+	const auto start = std::chrono::steady_clock::now();
+	Context context( kSmallCacheBytes );
+	Slide server;
+	open_native( context, path, server );
+	const auto before = context_stats( context );
+	auto first = std::vector<uint8_t>{};
+	auto second = std::vector<uint8_t>{};
+	auto error = pyra_error{};
+	require( pyra_read_encoded_tile( server.value_, 0, 0, collect, &first, &error ) == PYRA_OK && !first.empty(),
+		std::string( "First read: " ) + error.message );
+	const auto loaded = context_stats( context );
+	require( loaded.compressed_cache_misses == before.compressed_cache_misses + 1 &&
+		loaded.compressed_cache_hits == before.compressed_cache_hits, "The first read was not a compressed-cache miss" );
+	require( loaded.source_tile_reads == before.source_tile_reads + 1, "The first read did not read the file" );
+	require( pyra_read_encoded_tile( server.value_, 0, 0, collect, &second, &error ) == PYRA_OK,
+		std::string( "Second read: " ) + error.message );
+	const auto again = context_stats( context );
+	require( again.compressed_cache_hits == loaded.compressed_cache_hits + 1 &&
+		again.compressed_cache_misses == loaded.compressed_cache_misses, "The second read was not a compressed-cache hit" );
+	require( again.source_tile_reads == loaded.source_tile_reads, "The cached read read the file again" );
+	require( second == first, "The cached tile differs from the one read from the file" );
+	std::cout << "test_remote_served_tile_cached: PASS (" << first.size() << " bytes, "
+		<< elapsed_ms( start ) << " ms)\n";
+}
+
+
+// A compressed budget smaller than one slot holds no tile: a served tile is read
+// past the cache, still with the file's bytes, and every such read is counted
+// as a bypass (and a miss) so a viewer can say the budget is too small.
+void test_remote_served_tile_bypass_counted ( const std::filesystem::path &path )
+{
+	auto expected = std::vector<uint8_t>{};
+	auto error = pyra_error{};
+	{
+		Context context;
+		Slide server;
+		open_native( context, path, server );
+		require( pyra_read_encoded_tile( server.value_, 0, 0, collect, &expected, &error ) == PYRA_OK && !expected.empty(),
+			std::string( "Cached read: " ) + error.message );
+		require( context_stats( context ).compressed_cache_bypasses == 0, "A cache with room counted a bypass" );
+	}
+	const auto start = std::chrono::steady_clock::now();
+	Context context( kSlotlessCacheBytes );
+	Slide server;
+	open_native( context, path, server );
+	const auto before = context_stats( context );
+	for (auto read = uint64_t{ 1 }; read <= 2; ++read) {
+		auto bytes = std::vector<uint8_t>{};
+		require( pyra_read_encoded_tile( server.value_, 0, 0, collect, &bytes, &error ) == PYRA_OK,
+			std::string( "Bypass read: " ) + error.message );
+		require( bytes == expected, "The tile read past the cache differs from the cached one" );
+		const auto after = context_stats( context );
+		require( after.compressed_cache_bypasses == before.compressed_cache_bypasses + read &&
+			after.compressed_cache_misses == before.compressed_cache_misses + read &&
+			after.compressed_cache_hits == before.compressed_cache_hits, "The read past the cache was not counted as a bypass" );
+		require( after.source_tile_reads == before.source_tile_reads + read, "The read past the cache was not counted as a file read" );
+	}
+	std::cout << "test_remote_served_tile_bypass_counted: PASS (" << expected.size() << " bytes, "
+		<< elapsed_ms( start ) << " ms)\n";
+}
+
+
+// Renders a native-resolution view of plane 0, filling both caches; a coarse
+// view could come from a level synthesized at open, held outside the caches.
+void fill_caches ( pyra_wsi *wsi )
+{
+	auto plane = pyra_plane_info{};
+	plane.struct_size = sizeof( plane );
+	auto error = pyra_error{};
+	require( pyra_get_plane_info( wsi, 0, &plane, &error ) == PYRA_OK, error.message );
+	require( render( wsi, views( plane, 0 ).back() ).status == PYRA_OK, "The cache-filling render was incomplete" );
+}
+
+
+void test_pyra_clear_cache_compressed_only ( const std::filesystem::path &path )
+{
+	Context context;
+	Slide slide;
+	open_native( context, path, slide );
+	fill_caches( slide.value_ );
+	const auto start = std::chrono::steady_clock::now();
+	const auto filled = context_stats( context );
+	require( filled.compressed_cache_bytes > 0 && filled.decoded_cache_bytes > 0, "The render left a cache empty" );
+	auto freed = uint64_t{};
+	auto error = pyra_error{};
+	require( pyra_clear_cache( slide.value_, PYRA_CACHE_COMPRESSED, &freed, &error ) == PYRA_OK, error.message );
+	const auto cleared = context_stats( context );
+	require( freed == filled.compressed_cache_bytes && cleared.compressed_cache_bytes == 0,
+		"The compressed cache was not emptied" );
+	require( cleared.compressed_cache_hits == 0 && cleared.compressed_cache_misses == 0 &&
+		cleared.compressed_cache_bypasses == 0, "The compressed lookup counters did not restart" );
+	require( cleared.decoded_cache_bytes == filled.decoded_cache_bytes &&
+		cleared.decoded_cache_hits == filled.decoded_cache_hits && cleared.decoded_cache_misses == filled.decoded_cache_misses,
+		"Clearing the compressed cache touched the decoded one" );
+	require( cleared.source_tile_reads == filled.source_tile_reads, "Clearing restarted the tiles read from the file" );
+	auto bytes = std::vector<uint8_t>{};
+	require( pyra_read_encoded_tile( slide.value_, 0, 0, collect, &bytes, &error ) == PYRA_OK, error.message );
+	const auto reread = context_stats( context );
+	require( reread.compressed_cache_misses == 1 && reread.compressed_cache_hits == 0 &&
+		reread.source_tile_reads == filled.source_tile_reads + 1, "A tile read after clearing was not a miss" );
+	std::cout << "test_pyra_clear_cache_compressed_only: PASS (" << freed << " bytes freed, "
+		<< elapsed_ms( start ) << " ms)\n";
+}
+
+
+void test_pyra_clear_cache_decoded_only ( const std::filesystem::path &path )
+{
+	Context context;
+	Slide slide;
+	open_native( context, path, slide );
+	fill_caches( slide.value_ );
+	const auto start = std::chrono::steady_clock::now();
+	const auto filled = context_stats( context );
+	auto error = pyra_error{};
+	require( pyra_clear_cache( slide.value_, PYRA_CACHE_DECODED, nullptr, &error ) == PYRA_OK, error.message );
+	const auto cleared = context_stats( context );
+	require( cleared.decoded_cache_bytes == 0 && cleared.decoded_cache_hits == 0 && cleared.decoded_cache_misses == 0,
+		"The decoded cache was not emptied" );
+	require( cleared.compressed_cache_bytes == filled.compressed_cache_bytes &&
+		cleared.compressed_cache_hits == filled.compressed_cache_hits, "Clearing the decoded cache touched the compressed one" );
+	fill_caches( slide.value_ );
+	const auto refilled = context_stats( context );
+	require( refilled.decoded_cache_misses > 0 && refilled.compressed_cache_hits > filled.compressed_cache_hits &&
+		refilled.source_tile_reads == filled.source_tile_reads,
+		std::format( "The render after clearing did not decode again from the compressed cache: decoded misses {}, "
+			"compressed hits {} -> {}, misses {} -> {}, tiles read {} -> {}", refilled.decoded_cache_misses,
+			filled.compressed_cache_hits, refilled.compressed_cache_hits, filled.compressed_cache_misses,
+			refilled.compressed_cache_misses, filled.source_tile_reads, refilled.source_tile_reads ) );
+	std::cout << "test_pyra_clear_cache_decoded_only: PASS (" << elapsed_ms( start ) << " ms)\n";
+}
+
+
+// A compressed entry is exactly its tile: the used bytes are the bytes of the
+// tiles held, and nothing is allocated ahead of them, whatever the topology.
+void test_pyra_cache_used_bytes_exact_tiles ( const std::filesystem::path &path )
+{
+	for (const auto topology : { PYRA_CACHE_ARENA, PYRA_CACHE_PER_LEVEL }) {
+		Context context( kCacheBytes, topology );
+		Slide slide;
+		open_native( context, path, slide );
+		auto error = pyra_error{};
+		require( pyra_clear_cache( slide.value_, PYRA_CACHE_COMPRESSED, nullptr, &error ) == PYRA_OK, error.message );
+		const auto start = std::chrono::steady_clock::now();
+		auto expected = uint64_t{};
+		for (auto tile = 0u; tile < 2; ++tile) {
+			auto bytes = std::vector<uint8_t>{};
+			require( pyra_read_encoded_tile( slide.value_, 0, tile, collect, &bytes, &error ) == PYRA_OK, error.message );
+			expected += bytes.size();
+			const auto stats = context_stats( context );
+			require( stats.compressed_cache_tiles == tile + 1, std::format( "The cache holds {} tiles after {} reads",
+				stats.compressed_cache_tiles, tile + 1 ) );
+			require( stats.compressed_cache_used_bytes == expected && stats.compressed_cache_bytes == expected,
+				std::format( "Compressed bytes are not the tiles' own: {} used, {} allocated, {} read",
+					stats.compressed_cache_used_bytes, stats.compressed_cache_bytes, expected ) );
+		}
+		std::cout << "test_pyra_cache_used_bytes_exact_tiles: PASS (" << ( topology == PYRA_CACHE_ARENA ? "arena" : "level" )
+			<< ", " << expected << " bytes for 2 tiles, " << elapsed_ms( start ) << " ms)\n";
+	}
+}
+
+
+// Decoded slots are fixed: the used bytes are the used slots' share of the
+// allocated storage.
+void test_pyra_cache_used_bytes_decoded_slots ( const std::filesystem::path &path )
+{
+	Context context;
+	Slide slide;
+	open_native( context, path, slide );
+	fill_caches( slide.value_ );
+	const auto start = std::chrono::steady_clock::now();
+	const auto stats = context_stats( context );
+	auto usage = pyra_cache_usage{};
+	usage.struct_size = sizeof( usage );
+	auto error = pyra_error{};
+	require( pyra_get_cache_usage( slide.value_, -1, &usage, &error ) == PYRA_OK, error.message );
+	require( usage.decoded_allocated_slots > 0 && stats.decoded_cache_used_bytes ==
+		stats.decoded_cache_bytes / usage.decoded_allocated_slots * usage.decoded_used_slots,
+		"Arena decoded used bytes are not the used slots' share" );
+	require( stats.compressed_cache_used_bytes == stats.compressed_cache_bytes,
+		"Compressed storage holds bytes beyond its tiles" );
+	std::cout << "test_pyra_cache_used_bytes_decoded_slots: PASS (" << elapsed_ms( start ) << " ms)\n";
+}
+
+
+void test_pyra_clear_cache_rejects_no_cache ( const std::filesystem::path &path )
+{
+	Context context;
+	Slide slide;
+	open_native( context, path, slide );
+	const auto start = std::chrono::steady_clock::now();
+	auto error = pyra_error{};
+	require( pyra_clear_cache( slide.value_, 0, nullptr, &error ) != PYRA_OK &&
+		pyra_clear_cache( slide.value_, 4, nullptr, &error ) != PYRA_OK, "A clear naming no known cache was accepted" );
+	std::cout << "test_pyra_clear_cache_rejects_no_cache: PASS (" << elapsed_ms( start ) << " ms)\n";
+}
+
+
 // A deterministic pattern with detail at every scale, so a misplaced or
 // misdecoded tile changes pixels.
 template <typename pixeltype>
@@ -401,6 +621,13 @@ int main ( int argc, char **argv )
 		auto slides = fixtures( std::filesystem::path( argv[1] ) );
 		test_remote_missing_tile_incomplete( slides.front() );
 		test_remote_put_rejects_oversize( slides.front() );
+		test_remote_served_tile_cached( slides.front() );
+		test_remote_served_tile_bypass_counted( slides.front() );
+		test_pyra_clear_cache_compressed_only( slides.front() );
+		test_pyra_clear_cache_decoded_only( slides.front() );
+		test_pyra_clear_cache_rejects_no_cache( slides.front() );
+		test_pyra_cache_used_bytes_exact_tiles( slides.front() );
+		test_pyra_cache_used_bytes_decoded_slots( slides.front() );
 		for (auto i = 2; i < argc; ++i)
 			slides.push_back( std::filesystem::path( argv[i] ) );
 		for (const auto &slide : slides) {

@@ -95,6 +95,18 @@ size_t cache_bytes ( const WsiState &state, bool decoded )
 }
 
 
+size_t cache_used_bytes ( const WsiState &state, bool decoded )
+{
+	return priml::cache_kind( state.pyramid_, decoded ).used_bytes();
+}
+
+
+uint64_t cache_tiles ( const WsiState &state, bool decoded )
+{
+	return uint64_t( priml::cache_kind( state.pyramid_, decoded ).used_slots() );
+}
+
+
 // Called only for another, idle slide under the owning context's mutex. Free
 // backing allocations rather than merely marking their slots reusable.
 size_t reclaim_cache ( WsiState &state, bool decoded )
@@ -130,6 +142,8 @@ struct pyra_context {
 	uint64_t incomplete_ = 0;
 	uint64_t compressed_hits_ = 0;
 	uint64_t compressed_misses_ = 0;
+	uint64_t compressed_bypasses_ = 0;
+	uint64_t source_tile_reads_ = 0;
 	uint64_t decoded_hits_ = 0;
 	uint64_t decoded_misses_ = 0;
 
@@ -138,6 +152,22 @@ struct pyra_context {
 		for (const auto &weak : wsis_)
 			if (const auto state = weak.lock())
 				total += cache_bytes( *state, decoded );
+		return total;
+	}
+
+	uint64_t in_use ( bool decoded ) const {
+		auto total = uint64_t{ 0 };
+		for (const auto &weak : wsis_)
+			if (const auto state = weak.lock())
+				total += cache_used_bytes( *state, decoded );
+		return total;
+	}
+
+	uint64_t held ( bool decoded ) const {
+		auto total = uint64_t{ 0 };
+		for (const auto &weak : wsis_)
+			if (const auto state = weak.lock())
+				total += cache_tiles( *state, decoded );
 		return total;
 	}
 
@@ -664,6 +694,8 @@ pyra_status pyra_close ( pyra_wsi *wsi, pyra_error *error )
 			const auto &stats = owner->state_->pyramid_.stats;
 			wsi->context_->compressed_hits_ += stats.compressed_cache_hits;
 			wsi->context_->compressed_misses_ += stats.compressed_cache_misses;
+			wsi->context_->compressed_bypasses_ += stats.compressed_cache_bypasses;
+			wsi->context_->source_tile_reads_ += stats.tile_loads;
 			wsi->context_->decoded_hits_ += stats.decoded_cache_hits;
 			wsi->context_->decoded_misses_ += stats.decoded_cache_misses;
 		}
@@ -682,15 +714,25 @@ pyra_status pyra_context_get_stats ( pyra_context *context,
 		stats->struct_size = sizeof( *stats );
 		stats->compressed_cache_bytes = context->allocated( false );
 		stats->decoded_cache_bytes = context->allocated( true );
+		stats->compressed_cache_used_bytes = context->in_use( false );
+		stats->decoded_cache_used_bytes = context->in_use( true );
+		stats->compressed_cache_tiles = context->held( false );
+		stats->decoded_cache_tiles = context->held( true );
 		stats->cache_pool_evictions = context->evictions_;
 		stats->compressed_cache_hits = context->compressed_hits_;
 		stats->compressed_cache_misses = context->compressed_misses_;
+		stats->compressed_cache_bypasses = context->compressed_bypasses_;
+		stats->source_tile_reads = context->source_tile_reads_;
 		stats->decoded_cache_hits = context->decoded_hits_;
 		stats->decoded_cache_misses = context->decoded_misses_;
 		if (context->openslide_) {
 			stats->decoded_cache_bytes = context->options_.decoded_cache_bytes > 0 ? PYRA_STAT_UNAVAILABLE : 0;
+			stats->compressed_cache_used_bytes = stats->compressed_cache_bytes;
+			stats->decoded_cache_used_bytes = stats->decoded_cache_bytes;
+			stats->compressed_cache_tiles = stats->decoded_cache_tiles = PYRA_STAT_UNAVAILABLE;
 			stats->cache_pool_evictions = PYRA_STAT_UNAVAILABLE;
 			stats->compressed_cache_hits = stats->compressed_cache_misses = PYRA_STAT_UNAVAILABLE;
+			stats->compressed_cache_bypasses = stats->source_tile_reads = PYRA_STAT_UNAVAILABLE;
 			stats->decoded_cache_hits = stats->decoded_cache_misses = PYRA_STAT_UNAVAILABLE;
 		}
 		stats->wsi_handles = context->handles_;
@@ -702,6 +744,8 @@ pyra_status pyra_context_get_stats ( pyra_context *context,
 				if (!context->openslide_) {
 					stats->compressed_cache_hits += state->pyramid_.stats.compressed_cache_hits;
 					stats->compressed_cache_misses += state->pyramid_.stats.compressed_cache_misses;
+					stats->compressed_cache_bypasses += state->pyramid_.stats.compressed_cache_bypasses;
+					stats->source_tile_reads += state->pyramid_.stats.tile_loads;
 					stats->decoded_cache_hits += state->pyramid_.stats.decoded_cache_hits;
 					stats->decoded_cache_misses += state->pyramid_.stats.decoded_cache_misses;
 				}
@@ -735,6 +779,34 @@ pyra_status pyra_get_cache_usage ( pyra_wsi *wsi, int32_t level_index,
 			result.decoded_allocated_slots = uint64_t( decoded.num_slots );
 		}
 		*usage = result;
+	} );
+}
+
+
+pyra_status pyra_clear_cache ( pyra_wsi *wsi, uint32_t caches, uint64_t *freed_bytes, pyra_error *error )
+{
+	if (freed_bytes)
+		*freed_bytes = 0;
+	return api_call( error, [&] {
+		require( wsi != nullptr, "Slide is null" );
+		require( caches != 0 && ( caches & ~uint32_t( PYRA_CACHE_COMPRESSED | PYRA_CACHE_DECODED ) ) == 0,
+			"Choose PYRA_CACHE_COMPRESSED and/or PYRA_CACHE_DECODED" );
+// Renders and tile reads hold this mutex throughout, so no tile is in flight.
+		auto guard = std::scoped_lock( wsi->context_->mutex_ );
+		require( !wsi->state_->openslide_, "OpenSlide's tile cache cannot be cleared", PYRA_UNSUPPORTED );
+		auto &state = *wsi->state_;
+		auto &stats = state.pyramid_.stats;
+		auto freed = uint64_t{ 0 };
+		if (caches & PYRA_CACHE_COMPRESSED) {
+			freed += reclaim_cache( state, false );
+			stats.compressed_cache_hits = stats.compressed_cache_misses = stats.compressed_cache_bypasses = 0;
+		}
+		if (caches & PYRA_CACHE_DECODED) {
+			freed += reclaim_cache( state, true );
+			stats.decoded_cache_hits = stats.decoded_cache_misses = 0;
+		}
+		if (freed_bytes)
+			*freed_bytes = freed;
 	} );
 }
 

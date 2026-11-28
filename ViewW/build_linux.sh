@@ -14,7 +14,7 @@ build_dir=${1:-"$source_dir/out/build/linux-web"}
 mkdir -p -- "$build_dir"
 build_dir=$(cd -- "$build_dir" && pwd)
 jobs=${PYRA_BUILD_JOBS:-2}
-# Optional browser client: a folder holding pyra_client.js and pyra_client.wasm
+# Optional browser client: a folder holding pvue_client.js and pvue_client.wasm
 # from an Emscripten build (copied from another machine is fine; see README).
 client_dir=${PYRA_WEB_CLIENT_DIR:-}
 if [[ -n "$client_dir" ]]; then

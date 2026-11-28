@@ -168,6 +168,56 @@ uint64_t open ( httplib::Client &client, const httplib::Headers &headers, const 
 	return generation( response->body );
 }
 
+
+// "name=value" of a Set-Cookie header, without its attributes; empty if absent.
+std::string set_cookie ( const httplib::Result &response, const std::string &name )
+{
+	for (auto [it, end] = response->headers.equal_range( "Set-Cookie" ); it != end; ++it) {
+		if (it->second.starts_with( name + "=" ))
+			return it->second.substr( 0, it->second.find( ';' ) );
+	}
+	return {};
+}
+
+
+// A browser's API headers: loads the page (with `base`, e.g. a proxy's Host and
+// an access cookie) and returns its session cookie and page token on top of `base`.
+httplib::Headers connect ( httplib::Client &client, httplib::Headers base = {} )
+{
+	const auto page = client.Get( "/", base );
+	require( page && page->status == 200, page ? page->body.c_str() : "Page request failed" );
+	const auto cookie = set_cookie( page, "pyra_sid" );
+	require( !cookie.empty(), "The page set no session cookie" );
+	const auto marker = std::string( "name=\"pyra-session\" content=\"" );
+	const auto start = page->body.find( marker );
+	require( start != std::string::npos, "The page carries no session token" );
+	const auto token = page->body.substr( start + marker.size(), page->body.find( '"', start + marker.size() ) -
+		start - marker.size() );
+	auto cookies = cookie;
+	if (const auto found = base.find( "Cookie" ); found != base.end()) {
+		cookies = found->second + "; " + cookie;
+		base.erase( found );
+	}
+	base.emplace( "Cookie", cookies );
+	base.emplace( "X-Pyra-Session", token );
+	return base;
+}
+
+
+// A server behind a proxy at `origins`; returns the proxy-side headers of a
+// browser that has opened the access URL.
+httplib::Headers proxied_access ( httplib::Client &client, const pyra::web::Server &server, const std::string &host )
+{
+	const auto forwarded = httplib::Headers{ { "Host", host }, { "X-Forwarded-For", "192.0.2.7" } };
+	const auto admitted = client.Get( "/?key=" + server.access_key(), forwarded );
+	require( admitted && admitted->status == 302, "The access key was not accepted" );
+	const auto access = set_cookie( admitted, "pyra_access" );
+	require( !access.empty(), "The access key gave no access cookie" );
+	auto headers = forwarded;
+	headers.emplace( "Cookie", access );
+	return headers;
+}
+
 } // namespace
 
 
@@ -179,7 +229,7 @@ int main ( int argc, char **argv )
 		auto client = httplib::Client( "127.0.0.1", host.port_ );
 		client.set_connection_timeout( 5, 0 );
 		client.set_read_timeout( 15, 0 );
-		const auto headers = httplib::Headers{ { "X-Pyra-Session", host.server_.token() } };
+		const auto headers = connect( client );
 		auto failed = 0;
 		const auto run = [&] ( const char *name, auto test ) {
 			const auto start = std::chrono::steady_clock::now();
@@ -193,7 +243,7 @@ int main ( int argc, char **argv )
 				<< std::chrono::duration_cast<std::chrono::microseconds>( std::chrono::steady_clock::now() - start ).count() << " us)\n";
 		};
 		run( "test_web_embedded_assets", [&] {
-			for (const auto *path : { "/", "/viewer.css", "/viewer.js" }) {
+			for (const auto *path : { "/", "/viewer.css", "/viewer.js", "/pvue_view.js" }) {
 				const auto response = client.Get( path );
 				require( response && response->status == 200 && !response->body.empty(), "Embedded asset missing" );
 			}
@@ -270,6 +320,34 @@ int main ( int argc, char **argv )
 			pyra_close( remote, nullptr );
 			pyra_context_destroy( context, nullptr );
 		} );
+		run( "test_web_server_sends_channel_tiles_unchanged", [&] {
+			const auto version = open( client, headers, "channels_rgb.ptf" );
+			auto *context = static_cast<pyra_context *>( nullptr );
+			auto *native = static_cast<pyra_wsi *>( nullptr );
+			const auto utf8 = ( pyra::web::utf8_path( argv[1] ) / "channels_rgb.ptf" ).u8string();
+			require( pyra_context_create( nullptr, &context, nullptr ) == PYRA_OK &&
+				pyra_open( context, std::string( utf8.begin(), utf8.end() ).c_str(), &native, nullptr ) == PYRA_OK,
+				"Channel fixture does not open natively" );
+			const auto sink = [] ( void *user, const void *data, size_t size ) {
+				static_cast<std::string *>( user )->assign( static_cast<const char *>( data ), size );
+			};
+			auto compared = 0;
+			for (auto level = 0u; ; ++level) {
+				auto expected = std::string{};
+				if (pyra_read_encoded_tile( native, level, 0, sink, &expected, nullptr ) != PYRA_OK)
+					break;
+				for (auto tile = 0u; pyra_read_encoded_tile( native, level, tile, sink, &expected, nullptr ) == PYRA_OK; ++tile) {
+					const auto served = client.Get( std::format( "/api/raw-tile?generation={}&level={}&tile={}",
+						version, level, tile ), headers );
+					require( served && served->status == 200 && served->body == expected,
+						std::format( "Level {} tile {} was not sent as stored", level, tile ).c_str() );
+					++compared;
+				}
+			}
+			pyra_close( native, nullptr );
+			pyra_context_destroy( context, nullptr );
+			require( compared >= 4 * 20, std::format( "Only {} channel tiles were compared", compared ).c_str() );
+		} );
 		run( "test_web_render_htj2k_is_lossless", [&] {
 			const auto version = open( client, headers, "images/rgb8/rgb8.glr" );
 			const auto raw = client.Get( view_url( version ), headers );
@@ -314,6 +392,95 @@ int main ( int argc, char **argv )
 			require( std::all_of( ok.begin(), ok.end(), [] ( bool v ) { return v; } ),
 				"A concurrent tile request was refused" );
 		} );
+		run( "test_web_cache_counts_tiles_read_and_served", [&] {
+			const auto version = open( client, headers, "coarse.ptf" );
+			const auto url = "/api/raw-tile?generation=" + std::to_string( version ) + "&level=0&tile=0";
+			for (auto i = 0; i < 2; ++i) {
+				const auto tile = client.Get( url, headers );
+				require( tile && tile->status == 200, "Cannot read a raw tile" );
+			}
+			const auto usage = client.Get( "/api/cache", headers );
+			require( usage && usage->status == 200 && usage->body.find( "\"tiles\":{\"read\":" ) != std::string::npos &&
+				usage->body.find( ",\"served\":2,\"served_bytes\":" ) != std::string::npos,
+				( "Cache usage does not count the tiles read and served: " + usage->body ).c_str() );
+		} );
+		run( "test_web_cache_counts_compressed_hits", [&] {
+			const auto version = open( client, headers, "coarse.ptf" );
+			const auto lookups = [&] {
+				const auto usage = client.Get( "/api/cache", headers );
+				require( usage && usage->status == 200, "Cannot read the cache usage" );
+				const auto number = [&] ( const std::string &key ) {
+					const auto at = usage->body.find( key );
+					require( at != std::string::npos, ( "Cache usage lacks " + key + ": " + usage->body ).c_str() );
+					return std::stoull( usage->body.substr( at + key.size() ) );
+				};
+				return std::array<uint64_t, 2>{ number( "\"hits\":" ), number( "\"misses\":" ) };
+			};
+			const auto before = lookups();
+			const auto url = "/api/raw-tile?generation=" + std::to_string( version ) + "&level=0&tile=0";
+			for (auto i = 0; i < 2; ++i) {
+				const auto tile = client.Get( url, headers );
+				require( tile && tile->status == 200, "Cannot read a raw tile" );
+			}
+			const auto after = lookups();
+			require( after[0] > before[0] && after[1] >= before[1],
+				std::format( "Serving a tile twice did not count a compressed hit: hits {} -> {}, misses {} -> {}",
+					before[0], after[0], before[1], after[1] ).c_str() );
+		} );
+		run( "test_web_cache_clear_resets_compressed", [&] {
+			const auto version = open( client, headers, "coarse.ptf" );
+			const auto url = "/api/raw-tile?generation=" + std::to_string( version ) + "&level=0&tile=0";
+			for (auto i = 0; i < 2; ++i) {
+				const auto tile = client.Get( url, headers );
+				require( tile && tile->status == 200, "Cannot read a raw tile" );
+			}
+			const auto cleared = client.Post( "/api/cache/clear", headers, httplib::Params{ { "compressed", "1" } } );
+			require( cleared && cleared->status == 200 && cleared->body.find( "{\"freed\":" ) == 0 &&
+				cleared->body != "{\"freed\":0}", ( "The compressed cache was not cleared: " +
+					( cleared ? cleared->body : std::string( "no response" ) ) ).c_str() );
+			const auto empty = client.Get( "/api/cache", headers );
+			require( empty && empty->status == 200 && empty->body.find( "\"compressed\":{\"bytes\":0," ) != std::string::npos &&
+				empty->body.find( ",\"held\":0,\"hits\":0,\"misses\":0,\"bypassed\":0}" ) != std::string::npos,
+				( "The cleared cache still reports content or lookups: " + empty->body ).c_str() );
+			const auto again = client.Get( url, headers );
+			require( again && again->status == 200, "Cannot read the tile after clearing" );
+			const auto refilled = client.Get( "/api/cache", headers );
+			require( refilled && refilled->body.find( ",\"held\":1,\"hits\":0,\"misses\":1,\"bypassed\":0}" ) != std::string::npos,
+				( "The tile read after clearing was not a miss: " + refilled->body ).c_str() );
+		} );
+		run( "test_web_cache_clear_needs_choice_and_slide", [&] {
+			auto fresh = RunningServer( pyra::web::utf8_path( argv[1] ) );
+			auto own = httplib::Client( "127.0.0.1", fresh.port_ );
+			const auto session = connect( own );
+			const auto closed = own.Post( "/api/cache/clear", session, httplib::Params{ { "compressed", "1" } } );
+			require( closed && closed->status == 409, "A clear without an open slide was not refused" );
+			open( own, session, "coarse.ptf" );
+			const auto none = own.Post( "/api/cache/clear", session, httplib::Params{} );
+			require( none && none->status == 400, "A clear naming no cache was not refused" );
+		} );
+		run( "test_web_open_per_level_topology", [&] {
+			const auto opened = client.Post( "/api/open", headers,
+				httplib::Params{ { "path", "coarse.ptf" }, { "topology", "1" } } );
+			require( opened && opened->status == 200, "Cannot open with the per-level cache layout" );
+			const auto usage = client.Get( "/api/cache", headers );
+			require( usage && usage->status == 200 && usage->body.find( ",\"topology\":1," ) != std::string::npos,
+				( "The per-level layout is not reported: " + ( usage ? usage->body : std::string() ) ).c_str() );
+			open( client, headers, "coarse.ptf" );
+			const auto arena = client.Get( "/api/cache", headers );
+			require( arena && arena->body.find( ",\"topology\":0," ) != std::string::npos,
+				"An open without a layout did not use the arena" );
+		} );
+		run( "test_web_generation_unique_across_server_runs", [&] {
+			auto generations = std::array<uint64_t, 2>{};
+			for (auto &number : generations) {
+				auto run = RunningServer( pyra::web::utf8_path( argv[1] ) );
+				auto own = httplib::Client( "127.0.0.1", run.port_ );
+				number = open( own, connect( own ), "coarse.ptf" );
+			}
+			require( generations[0] != generations[1] && generations[0] > 1,
+				"A restarted server reissued an image number, so the browser would reuse the old run's tiles" );
+			require( generations[1] < ( uint64_t{ 1 } << 53 ), "The image number is not exact as a JavaScript number" );
+		} );
 		run( "test_web_raw_tile_stale_generation", [&] {
 			const auto version = open( client, headers, "coarse.ptf" );
 			const auto response = client.Get( "/api/raw-tile?generation=" + std::to_string( version + 1 ) +
@@ -325,24 +492,247 @@ int main ( int argc, char **argv )
 			options.view_halo_percent = 7;
 			auto halo = RunningServer( std::move( options ) );
 			auto halo_client = httplib::Client( "127.0.0.1", halo.port_ );
-			const auto response = halo_client.Get( "/api/state", { { "X-Pyra-Session", halo.server_.token() } } );
+			const auto response = halo_client.Get( "/api/state", connect( halo_client ) );
 			require( response && response->status == 200 && response->body.find( std::format(
 				"\"view_halo\":7,\"view_halo_max\":{}", pyra::web::kViewHaloMaxPercent ) ) != std::string::npos,
 				"State does not carry the configured view halo" );
 		} );
+		run( "test_web_state_sends_server_pbf", [&] {
+			const auto response = client.Get( "/api/state", headers );
+			require( response && response->status == 200 && response->body.find( std::format(
+				"\"server_pbf_mib\":{},", pyra::web::kServerDecodedCacheMiB ) ) != std::string::npos,
+				"State does not carry the server's PBF" );
+		} );
 		run( "test_web_public_origin_accepted", [&] {
 			auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
-			options.public_origin = "https://viewer.example.org/";
+			options.public_origins = { "https://viewer.example.org/" };
 			auto proxied = RunningServer( std::move( options ) );
 			auto proxy = httplib::Client( "127.0.0.1", proxied.port_ );
-			auto forwarded = httplib::Headers{ { "X-Pyra-Session", proxied.server_.token() },
-				{ "Host", "viewer.example.org" }, { "Origin", "https://viewer.example.org" } };
+			auto forwarded = connect( proxy, proxied_access( proxy, proxied.server_, "viewer.example.org" ) );
+			forwarded.emplace( "Origin", "https://viewer.example.org" );
 			const auto accepted = proxy.Get( "/api/state", forwarded );
 			require( accepted && accepted->status == 200, "A request from the public origin was refused" );
 			forwarded.erase( "Origin" );
 			forwarded.emplace( "Origin", "https://other.example.org" );
 			const auto refused = proxy.Get( "/api/state", forwarded );
 			require( refused && refused->status == 403, "A foreign origin was accepted through the proxy host" );
+		} );
+		run( "test_web_public_origin_requires_access_key", [&] {
+			auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
+			options.public_origins = { "https://viewer.example.org" };
+			auto proxied = RunningServer( std::move( options ) );
+			auto proxy = httplib::Client( "127.0.0.1", proxied.port_ );
+			const auto forwarded = httplib::Headers{ { "Host", "viewer.example.org" }, { "X-Forwarded-For", "192.0.2.7" } };
+			for (const auto *path : { "/", "/viewer.js", "/?key=0123" }) {
+				const auto refused = proxy.Get( path, forwarded );
+				require( refused && refused->status == 403, "A network browser without the access key was let in" );
+			}
+			auto stolen = forwarded;
+			stolen.emplace( "Cookie", "pyra_access=" + proxied.server_.access_key() );
+			const auto key_as_cookie = proxy.Get( "/", stolen );
+			require( key_as_cookie && key_as_cookie->status == 403, "The access key itself served as the access cookie" );
+			const auto admitted = proxied_access( proxy, proxied.server_, "viewer.example.org" );
+			const auto page = proxy.Get( "/", admitted );
+			require( page && page->status == 200, "The access cookie did not open the page" );
+			auto secure = false;
+			for (auto [it, end] = page->headers.equal_range( "Set-Cookie" ); it != end; ++it)
+				secure = secure || it->second.find( "; Secure" ) != std::string::npos;
+			require( secure, "The session cookie of an https origin is not Secure" );
+		} );
+		run( "test_web_forwarded_loopback_host_is_not_local", [&] {
+			auto forwarded = headers;
+			forwarded.emplace( "X-Forwarded-For", "192.0.2.7" );
+			const auto refused = client.Get( "/api/state", forwarded );
+			require( refused && refused->status == 403, "A proxied request naming the loopback host was taken as local" );
+		} );
+		run( "test_web_public_origin_multiple", [&] {
+			auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
+			options.public_origins = { "https://viewer.example.org", "https://192.0.2.10:8443" };
+			auto proxied = RunningServer( std::move( options ) );
+			auto proxy = httplib::Client( "127.0.0.1", proxied.port_ );
+			for (const auto *host : { "viewer.example.org", "192.0.2.10:8443" }) {
+				const auto response = proxy.Get( "/api/state", connect( proxy, proxied_access( proxy, proxied.server_, host ) ) );
+				require( response && response->status == 200, "A configured public origin was refused" );
+			}
+		} );
+		run( "test_web_remote_write_refused", [&] {
+			for (const auto allowed : { false, true }) {
+				auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
+				options.public_origins = { "https://viewer.example.org" };
+				options.allow_remote_write = allowed;
+				auto proxied = RunningServer( std::move( options ) );
+				auto proxy = httplib::Client( "127.0.0.1", proxied.port_ );
+				const auto remote = connect( proxy, proxied_access( proxy, proxied.server_, "viewer.example.org" ) );
+				const auto state = proxy.Get( "/api/state", remote );
+				require( state && state->status == 200 && state->body.find( std::format( "\"local\":false,\"remote_write\":{}",
+					allowed ) ) != std::string::npos, "State does not report the network client's write access" );
+				const auto gallery = proxy.Post( "/api/make-gallery", remote, httplib::Params{ { "path", "images/gray8" } } );
+				const auto generate = proxy.Post( "/api/generate", remote, httplib::Params{ { "path", "" } } );
+				const auto cancel = proxy.Post( "/api/generate-cancel", remote, "", "text/plain" );
+				const auto analyse = proxy.Post( "/api/analyse", remote, "", "text/plain" );
+				for (const auto *response : { &gallery, &generate, &cancel, &analyse })
+					require( *response && ( ( *response )->status == 403 ) == !allowed,
+						allowed ? "An allowed network write was refused" : "A network client was allowed to write" );
+				const auto local_state = proxy.Get( "/api/state", connect( proxy ) );
+				require( local_state && local_state->body.find( "\"local\":true,\"remote_write\":true" ) != std::string::npos,
+					"A loopback client may not write" );
+			}
+		} );
+		run( "test_web_session_isolation", [&] {
+			const auto second = connect( client );
+			const auto first_version = open( client, headers, "coarse.ptf" );
+			const auto second_version = open( client, second, "images/rgb8/rgb8.glr" );
+			require( first_version != second_version, "Two sessions share a generation" );
+			const auto first = client.Get( "/api/render?generation=" + std::to_string( first_version ) +
+				"&plane=0&overview=1", headers );
+			const auto mine = client.Get( view_url( second_version ), second );
+			const auto crossed = client.Get( view_url( first_version ), second );
+			require( first && first->status == 200 && mine && mine->status == 200 && mine->body.size() == 3 * 2 * 4,
+				"A session lost its slide when another opened one" );
+			require( crossed && crossed->status == 409, "A session rendered another session's slide" );
+		} );
+		run( "test_web_session_token_bound_to_cookie", [&] {
+			const auto second = connect( client );
+			auto mixed = headers;
+			mixed.erase( "X-Pyra-Session" );
+			mixed.emplace( "X-Pyra-Session", second.find( "X-Pyra-Session" )->second );
+			const auto refused = client.Get( "/api/state", mixed );
+			require( refused && refused->status == 403, "A token was accepted with another session's cookie" );
+			auto cookie_only = headers;
+			cookie_only.erase( "X-Pyra-Session" );
+			const auto no_token = client.Get( "/api/state", cookie_only );
+			require( no_token && no_token->status == 403, "A session cookie without its token was accepted" );
+		} );
+		run( "test_web_session_limit_refuses_when_busy", [&] {
+			auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
+			options.max_sessions = 1;
+			auto limited = RunningServer( std::move( options ) );
+			auto own = httplib::Client( "127.0.0.1", limited.port_ );
+			const auto kept = connect( own );
+			const auto refused = own.Get( "/" );
+			require( refused && refused->status == 503, "A session beyond the limit was opened" );
+			const auto same = own.Get( "/", kept );
+			require( same && same->status == 200 && set_cookie( same, "pyra_sid" ).empty(),
+				"A browser with a live session did not keep it" );
+		} );
+		run( "test_web_session_limit_evicts_idle", [&] {
+			auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
+			options.max_sessions = 1;
+			options.session_idle_seconds = 0;
+			auto limited = RunningServer( std::move( options ) );
+			auto own = httplib::Client( "127.0.0.1", limited.port_ );
+			const auto evicted = connect( own );
+			const auto newer = connect( own );
+			const auto gone = own.Get( "/api/state", evicted );
+			const auto live = own.Get( "/api/state", newer );
+			require( gone && gone->status == 403 && live && live->status == 200,
+				"The idle session was not replaced by the new one" );
+		} );
+		run( "test_web_cache_reports_budgets", [&] {
+			auto cached = RunningServer( pyra::web::utf8_path( argv[1] ) );
+			auto cached_client = httplib::Client( "127.0.0.1", cached.port_ );
+			const auto session = connect( cached_client );
+			const auto closed = cached_client.Get( "/api/cache", session );
+			require( closed && closed->status == 409, "Cache usage reported without an open slide" );
+			const auto opened = cached_client.Post( "/api/open", session,
+				httplib::Params{ { "path", "coarse.ptf" }, { "tbf_mib", "8" }, { "pbf_mib", "0" } } );
+			require( opened && opened->status == 200, "Cannot open the cache fixture" );
+			const auto version = generation( opened->body );
+			const auto rendered = cached_client.Get( std::format( "/api/render?generation={}&plane=0&x=0&y=0&width=64&height=64&mpp=1",
+				version ), session );
+			require( rendered && rendered->status == 200, "Cannot render the cache fixture" );
+			const auto usage = cached_client.Get( "/api/cache", session );
+			require( usage && usage->status == 200 &&
+				usage->body.find( std::format( ",\"cap\":{},\"held\":", 8 * 1024 * 1024 ) ) != std::string::npos &&
+				usage->body.find( ",\"bypassed\":0},\"decoded\":{\"bytes\":0,\"cap\":0,\"held\":0,\"hits\":0,\"misses\":0}" ) !=
+					std::string::npos && usage->body.find( "\"compressed\":{\"bytes\":0," ) == std::string::npos,
+				( "Cache usage does not report the slide's budgets: " + usage->body ).c_str() );
+			const auto reopened = cached_client.Post( "/api/open", session, httplib::Params{ { "path", "coarse.ptf" } } );
+			require( reopened && reopened->status == 200, "Cannot reopen the cache fixture" );
+			const auto native = cached_client.Get( "/api/cache", session );
+			require( native && native->status == 200 && native->body.find( std::format( "\"decoded\":{{\"bytes\":0,\"cap\":{},",
+				pyra::web::kServerDecodedCacheMiB * 1024 * 1024 ) ) != std::string::npos,
+				( "A native open without PBF did not get the server's PBF: " + native->body ).c_str() );
+		} );
+		run( "test_web_root_change_lists_new_root", [&] {
+			auto moved = RunningServer( pyra::web::utf8_path( argv[1] ) );
+			auto moved_client = httplib::Client( "127.0.0.1", moved.port_ );
+			const auto session = connect( moved_client );
+			const auto images = pyra::web::utf8_path( argv[1] ) / "images";
+			const auto changed = moved_client.Post( "/api/root", session, httplib::Params{ { "path", images.string() } } );
+			require( changed && changed->status == 200 && changed->body.find( "/images\",\"slide\":null" ) != std::string::npos,
+				"The local root change was not accepted" );
+			const auto listing = moved_client.Get( "/api/files?path=", session );
+			require( listing && listing->status == 200 && listing->body.find( "{\"name\":\"gray8\",\"directory\":true}" ) !=
+				std::string::npos, "The file list does not start at the new root" );
+			const auto outside = moved_client.Get( "/api/files?path=..", session );
+			require( outside && outside->status == 400, "The old root's parent stayed reachable" );
+		} );
+		run( "test_web_root_change_saved_for_next_start", [&] {
+			const auto file = pyra::web::utf8_path( argv[1] ) / "web_root_saved" / "web-root.txt";
+			auto cleanup = std::error_code{};
+			std::filesystem::remove_all( file.parent_path(), cleanup );
+			auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
+			options.root_file = file;
+			auto moved = RunningServer( std::move( options ) );
+			auto moved_client = httplib::Client( "127.0.0.1", moved.port_ );
+			const auto session = connect( moved_client );
+			const auto images = std::filesystem::canonical( pyra::web::utf8_path( argv[1] ) / "images" );
+			const auto changed = moved_client.Post( "/api/root", session, httplib::Params{ { "path", images.string() } } );
+			require( changed && changed->status == 200 && changed->body.find( "\"saved\":true" ) != std::string::npos,
+				"The changed root was not saved" );
+			auto saved = std::filesystem::path{};
+			require( pyra::web::read_saved_root( file, &saved ) && saved == images, "The saved root does not read back" );
+			std::filesystem::remove_all( file.parent_path(), cleanup );
+		} );
+		run( "test_web_saved_root_ignored_when_missing", [&] {
+			const auto file = pyra::web::utf8_path( argv[1] ) / "web_root_missing" / "web-root.txt";
+			auto saved = std::filesystem::path{};
+			require( !pyra::web::read_saved_root( file, &saved ), "A missing file gave a root" );
+			auto error = std::string{};
+			require( pyra::web::save_root( file, pyra::web::utf8_path( argv[1] ) / "no_such_directory", &error ),
+				error.c_str() );
+			require( !pyra::web::read_saved_root( file, &saved ) && saved.empty(),
+				"A saved root that is no longer a directory was used" );
+			auto cleanup = std::error_code{};
+			std::filesystem::remove_all( file.parent_path(), cleanup );
+		} );
+		run( "test_web_root_change_rejects_relative_or_missing", [&] {
+			auto moved = RunningServer( pyra::web::utf8_path( argv[1] ) );
+			auto moved_client = httplib::Client( "127.0.0.1", moved.port_ );
+			const auto session = connect( moved_client );
+			const auto missing = ( pyra::web::utf8_path( argv[1] ) / "no_such_directory" ).string();
+			for (const auto &path : { std::string( "images" ), std::string(), missing }) {
+				const auto refused = moved_client.Post( "/api/root", session, httplib::Params{ { "path", path } } );
+				require( refused && refused->status == 400, "A relative, empty or missing root was accepted" );
+			}
+		} );
+		run( "test_web_root_change_refused_for_network", [&] {
+			auto options = pyra::web::ServerOptions{ pyra::web::utf8_path( argv[1] ), {}, {} };
+			options.public_origins = { "https://viewer.example.org" };
+			options.allow_remote_write = true;
+			auto proxied = RunningServer( std::move( options ) );
+			auto proxy = httplib::Client( "127.0.0.1", proxied.port_ );
+			const auto remote = connect( proxy, proxied_access( proxy, proxied.server_, "viewer.example.org" ) );
+			const auto images = ( pyra::web::utf8_path( argv[1] ) / "images" ).string();
+			const auto refused = proxy.Post( "/api/root", remote, httplib::Params{ { "path", images } } );
+			require( refused && refused->status == 403, "A network client changed the image root" );
+			const auto listing = proxy.Get( "/api/files?path=images", remote );
+			require( listing && listing->status == 200, "The refused change moved the root" );
+		} );
+		run( "test_web_root_change_renames_open_slide", [&] {
+			auto moved = RunningServer( pyra::web::utf8_path( argv[1] ) );
+			auto moved_client = httplib::Client( "127.0.0.1", moved.port_ );
+			const auto session = connect( moved_client );
+			open( moved_client, session, "images/rgb8/rgb8.glr" );
+			const auto images = ( pyra::web::utf8_path( argv[1] ) / "images" ).string();
+			const auto changed = moved_client.Post( "/api/root", session, httplib::Params{ { "path", images } } );
+			require( changed && changed->status == 200 && changed->body.find( "\"slide\":\"rgb8/rgb8.glr\"" ) !=
+				std::string::npos, "The open slide was not named relative to the new root" );
+			const auto inner = ( pyra::web::utf8_path( argv[1] ) / "images" / "gray8" ).string();
+			const auto away = moved_client.Post( "/api/root", session, httplib::Params{ { "path", inner } } );
+			require( away && away->status == 200 && away->body.find( "\"slide\":null" ) != std::string::npos,
+				"A slide outside the new root kept a path" );
 		} );
 		run( "test_web_make_gallery_from_folder", [&] {
 			const auto refused = client.Post( "/api/make-gallery", headers,
@@ -523,7 +913,7 @@ int main ( int argc, char **argv )
 			auto analysing = RunningServer( std::move( options ) );
 			auto analyse_client = httplib::Client( "127.0.0.1", analysing.port_ );
 			analyse_client.set_read_timeout( 30, 0 );
-			const auto analyse_headers = httplib::Headers{ { "X-Pyra-Session", analysing.server_.token() } };
+			const auto analyse_headers = connect( analyse_client );
 			run( "test_web_analyse_capabilities", [&] {
 				const auto state = analyse_client.Get( "/api/state", analyse_headers );
 				require( state && state->body.find( "\"analyse\":{\"available\":true" ) != std::string::npos,

@@ -29,7 +29,8 @@ The GitHub repository of the project is **PyrA**. The CMake package, targets
 and identifiers are spelled `Pyra` / `pyra`.
 
 The library, C API and Python bridge live in `Core/`. The browser and Qt
-viewers live in `ViewW/` and `ViewD/` with their viewer-specific tests.
+viewers live in `ViewW/` and `ViewD/` with their viewer-specific tests. `Pvue/` is the display
+layer viewers share: which planes make the picture, and the browser client ([Pvue/README.md](Pvue/README.md)).
 Standalone tests, samples and benchmarks live in `Tests/`.
 [Bundled dependency sources](Deps/README.md) live in `Deps/`.
 

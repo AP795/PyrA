@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 	<meta name="pyra-session" content="PYRA_SESSION_TOKEN">
 	<title>PyrA · Local viewer</title>
 	<link rel="stylesheet" href="/viewer.css">
+	<script src="/pvue_view.js" defer></script>
 	<script src="/viewer.js" defer></script>
 </head>
 <body>
@@ -28,9 +29,10 @@ SPDX-License-Identifier: MIT
 		<span id="zoom-label">—</span>
 		<label class="halo" title="Image rendered around the view on every side, as a percentage of the view width. Panning reuses it; 0 renders only the visible view.">Halo
 			<input id="halo" type="number" min="0" max="50" step="1" value="20" aria-label="View halo, percent of the view width"> %</label>
+		<button id="settings" class="icon-button" aria-label="Settings" title="Cache settings"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L4.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1L11 21h4l.4-2.9a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)"/></svg></button>
 		<span class="connection" id="connection">Connecting…</span>
 	</header>
-	<main>
+	<main id="main">
 		<section class="stage" id="stage" aria-label="Image viewer">
 			<canvas id="view" tabindex="0" aria-label="Image viewport. Drag to pan; use the wheel to zoom."></canvas>
 			<div class="welcome" id="welcome"><span class="welcome-mark">P</span><h1>A closer look.</h1>
@@ -38,17 +40,25 @@ SPDX-License-Identifier: MIT
 				<p class="hint">Drag to pan · Scroll to zoom · F to fit · 1 for native pixels</p></div>
 			<div class="stage-badge" id="image-label" hidden></div>
 		</section>
+		<div class="splitter" id="splitter" role="separator" aria-orientation="vertical" aria-label="Side panel width"
+			aria-valuemin="240" tabindex="0" title="Drag to resize the side panel; double-click for the default width"></div>
 		<aside>
-			<section class="panel"><h2>Navigator</h2><div class="navigator">
+			<section class="panel"><h2>Navigator</h2>
+				<label for="plane">Channel / Z plane</label><select id="plane" disabled><option>No image open</option></select>
+				<div class="navigator">
 					<canvas id="minimap" aria-label="Overview. Click or drag to navigate."></canvas>
 					<div id="z-control" hidden><label for="z-slider" id="z-position">Z</label>
 						<input id="z-slider" type="range" min="0" max="0" step="1" value="0" aria-label="Focal plane Z" aria-orientation="vertical" disabled>
 					</div></div>
-				<label for="plane">Channel / Z plane</label><select id="plane" disabled><option>No image open</option></select>
 				<dl><dt>Resolution</dt><dd id="resolution">—</dd><dt>View raster</dt><dd id="raster">—</dd></dl></section>
 			<section class="panel"><h2>Render timing</h2><dl><dt>Native render</dt><dd id="render-time">—</dd>
-				<dt>Request + display</dt><dd id="total-time">—</dd><dt>Transferred</dt><dd id="transfer">—</dd></dl>
-				<p class="hint">Lossless display pixels. Timings include different parts of the rendering path.</p></section>
+				<dt>Request + display</dt><dd id="total-time">—</dd><dt>Total sent</dt><dd id="transfer">—</dd></dl>
+				<p class="hint">Lossless display pixels. Timings are the last render's and include different parts of the rendering path; Total sent counts the stored tiles the server sent for the open image.</p></section>
+			<section class="panel"><h2>Caches</h2><dl class="caches"><dt>Server TBF</dt><dd id="cache-server-compressed">—</dd>
+				<dt>Server PBF</dt><dd id="cache-server-decoded">—</dd><dt>Browser TBF</dt><dd id="cache-client-compressed">—</dd>
+				<dt>Browser PBF</dt><dd id="cache-client-decoded">—</dd>
+				<dt>Tiles read from file</dt><dd id="tiles-read">—</dd></dl>
+				<p class="hint">Tile storage each reader holds of its budget: TBF compressed tiles, PBF decoded pixels. A full cache evicts its oldest tiles. The browser's HTTP cache is not counted. Tiles read are the server's, for the open image.</p></section>
 			<section class="panel metadata"><h2>Metadata</h2><div id="metadata"><p class="hint">Image properties appear here.</p></div></section>
 		</aside>
 	</main>
@@ -56,15 +66,39 @@ SPDX-License-Identifier: MIT
 	<dialog id="open-dialog">
 		<form id="open-form">
 			<div class="dialog-heading"><h1>Open image</h1><button type="button" id="close-dialog" aria-label="Close">×</button></div>
-			<p class="hint">Choose a file beneath the server’s image directory.</p><p id="root-label" class="root-path"></p>
+			<p class="hint">Choose a file beneath the server’s image directory.</p>
+			<div class="root-heading"><p id="root-label" class="root-path"></p><button type="button" id="change-root" hidden title="Choose another image directory for this server; it is kept for the next start unless --root names one">Change</button></div>
+			<div id="root-editor" class="root-editor" hidden><input id="root-input" autocomplete="off" spellcheck="false" aria-label="Image directory, absolute path"><button type="button" id="set-root">Set</button><button type="button" id="cancel-root">Cancel</button></div>
 			<label for="path">Image path relative to this directory</label><input id="path" name="path" required autocomplete="off" placeholder="slide.svs">
 			<div class="folder-heading"><span id="folder-label">/</span><button type="button" id="parent-folder">Up</button><button type="button" id="make-gallery" title="Lay this folder's TIFF images out as one gallery slide">Make gallery</button></div>
 			<div id="file-list" class="file-list"></div>
 			<div class="options"><label>Reader<select id="backend"><option value="0">PyrA native</option><option value="1" disabled>OpenSlide</option></select></label>
-				<label>TBF · MiB<input id="tbf" type="number" min="1" max="1048576" required></label>
-				<label>PBF · MiB<input id="pbf" type="number" min="0" max="1048576" required></label>
 				<label>Threads<input id="threads" type="number" min="1" max="256" required></label></div>
 			<p id="open-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-dialog">Cancel</button><button id="open-submit" type="submit" class="primary">Open image</button></div>
+		</form>
+	</dialog>
+	<dialog id="settings-dialog">
+		<form id="settings-form">
+			<div class="dialog-heading"><h1>Cache settings</h1><button type="button" id="settings-close" aria-label="Close">×</button></div>
+			<p class="hint">TBF holds compressed tiles, PBF decoded ones. A new size or type reopens the open image, keeping the view, with every cache empty. A reset empties one cache and restarts its hit count. Resetting the server TBF leaves the browser's HTTP cache as it is: tiles the browser already holds are not asked for again. This browser remembers the settings.</p>
+			<table class="settings-table">
+				<thead><tr><th></th><th scope="col">Server</th><th scope="col">Browser</th></tr></thead>
+				<tbody>
+					<tr><th scope="row">TBF · MiB</th><td><input id="settings-server-tbf" type="number" min="1" max="1048576" required aria-label="Server TBF, MiB"></td>
+						<td><input id="settings-browser-tbf" type="number" min="1" required aria-label="Browser TBF, MiB"></td></tr>
+					<tr><th scope="row">PBF · MiB</th><td><input id="settings-server-pbf" type="number" min="0" max="1048576" required aria-label="Server PBF, MiB"></td>
+						<td><input id="settings-browser-pbf" type="number" min="0" required aria-label="Browser PBF, MiB"></td></tr>
+					<tr><th scope="row">Cache type</th><td><select id="settings-server-type" aria-label="Server cache type"><option value="0">Arena</option><option value="1">Per level</option></select></td>
+						<td><select id="settings-browser-type" aria-label="Browser cache type"><option value="0">Arena</option><option value="1">Per level</option></select></td></tr>
+					<tr><th scope="row">Reset TBF</th><td><input id="settings-server-reset-tbf" type="checkbox" aria-label="Reset the server TBF"></td>
+						<td><input id="settings-browser-reset-tbf" type="checkbox" aria-label="Reset the browser TBF"></td></tr>
+					<tr><th scope="row">Reset PBF</th><td><input id="settings-server-reset-pbf" type="checkbox" aria-label="Reset the server PBF"></td>
+						<td><input id="settings-browser-reset-pbf" type="checkbox" aria-label="Reset the browser PBF"></td></tr>
+				</tbody>
+			</table>
+			<p id="settings-note" class="hint"></p>
+			<p id="settings-error" class="error" role="alert"></p>
+			<div class="dialog-actions"><button type="button" id="settings-cancel">Cancel</button><button id="settings-apply" type="submit" class="primary">Apply</button></div>
 		</form>
 	</dialog>
 	<dialog id="generate-dialog">

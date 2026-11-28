@@ -51,11 +51,11 @@ void prepare_pyramid ( priml::Ppyr &pyramid, priml::CacheTopology topology, int 
 
 
 int acquire ( priml::WsiLoader &loader, priml::Ppyr &pyramid, int level_no, bool decoded,
-	int tile_no = 0 )
+	int tile_no = 0, size_t compressed_bytes = kSlotBytes )
 {
 	auto &tile = pyramid.levels[level_no].tiles[tile_no];
 	const auto slot = decoded ? loader.AcquirePixBfSlot<priml::Rgb>( pyramid, level_no, tile_no )
-		: loader.AcquireTileBfSlot( pyramid, level_no, tile_no );
+		: loader.AcquireTileBfSlot( pyramid, level_no, tile_no, compressed_bytes );
 	if (slot >= 0) {
 		if (decoded)
 			tile.nixbuf = slot;
@@ -117,11 +117,12 @@ void test_wsi_buffers_trim_keeps_occupied_slots ()
 }
 
 
-// PerLevel: a released slot's storage is kept until another level needs the
-// bytes, and only then given back.
+// PerLevel: a released decoded slot's storage is kept until another level needs
+// the bytes, and only then given back. (A compressed entry frees its bytes at
+// release - see test_wsi_buffers_variable_entries_exact_bytes.)
 void test_wsi_buffers_per_level_reclaims_unused_capacity ()
 {
-	for (const auto decoded : { false, true }) {
+	for (const auto decoded : { true }) {
 		auto pyramid = priml::Ppyr{};
 		prepare_pyramid( pyramid, priml::CacheTopology::PerLevel );
 		auto loader = priml::SvsLoader{};
@@ -173,10 +174,11 @@ void test_wsi_buffers_eviction_moves_capacity_between_levels ()
 }
 
 
+// Decoded slots only: compressed entries have no shared storage to reuse.
 void test_wsi_buffers_eviction_reuses_same_level_storage ()
 {
 	for (const auto topology : kTopologies)
-		for (const auto decoded : { false, true }) {
+		for (const auto decoded : { true }) {
 			auto pyramid = priml::Ppyr{};
 			prepare_pyramid( pyramid, topology, 2 );
 			auto loader = priml::SvsLoader{};
@@ -237,6 +239,68 @@ void test_wsi_buffers_reclaim_idle_cache ()
 }
 
 
+// A variable pool holds exactly the bytes of its entries and frees them at
+// release; its free slots hold nothing, so trimming them frees no bytes.
+void test_wsi_buffers_variable_entries_exact_bytes ()
+{
+	constexpr auto kSmall = size_t{ 1000 };
+	constexpr auto kLarge = size_t{ 30000 };
+	auto pool = priml::BufferPool{};
+	pool.init( kLarge, 4, true );
+	const auto small = pool.acquire( 0, 0, kSmall );
+	const auto large = pool.acquire( 0, 1, kLarge );
+	require( small >= 0 && large >= 0 && pool.slot_ptr( small ) && pool.slot_ptr( large ) &&
+		pool.allocated_bytes() == kSmall + kLarge && pool.used_bytes() == kSmall + kLarge &&
+		pool.entry_bytes( small ) == kSmall && pool.entry_bytes( large ) == kLarge,
+		"Variable entries do not hold exactly their own bytes" );
+	require( pool.acquire( 0, 2, kLarge + 1 ) < 0 && pool.acquire( 0, 2 ) < 0,
+		"A variable pool accepted an oversized or unsized entry" );
+	pool.release( large );
+	require( pool.allocated_bytes() == kSmall && pool.used_slots == 1 && pool.trim_free_tail() == 0,
+		"Releasing a variable entry did not free its bytes" );
+}
+
+
+// The compressed cache counts bytes, not slots: two half-size entries share a
+// one-slot cap at any topology, where fixed slots would have evicted one.
+void test_wsi_buffers_variable_entries_share_cap_by_bytes ()
+{
+	for (const auto topology : kTopologies) {
+		auto pyramid = priml::Ppyr{};
+		prepare_pyramid( pyramid, topology );
+		auto loader = priml::SvsLoader{};
+		require( acquire( loader, pyramid, 0, false, 0, kSlotBytes / 2 ) >= 0 &&
+			acquire( loader, pyramid, 1, false, 0, kSlotBytes / 2 ) >= 0 &&
+			pyramid.levels[0].tiles.front().ninbuf >= 0 &&
+			pyramid.tbf.allocated_bytes() == kSlotBytes,
+			"Two half-size compressed entries did not share a one-slot cap" );
+	}
+}
+
+
+// Under pressure the compressed cache frees the oldest entries in one batch of
+// at least 1/32 of what it holds - not one tile per scan - and keeps the rest.
+void test_wsi_buffers_variable_eviction_frees_oldest_batch ()
+{
+	constexpr auto kTiles = 65;
+	constexpr auto kEntry = size_t{ 100 };
+	auto pyramid = priml::Ppyr{};
+	prepare_pyramid( pyramid, priml::CacheTopology::PerPyramid, kTiles );
+	pyramid.tbf_init_bytes = pyramid.tbf_cap_bytes = ( kTiles - 1 ) * kEntry;
+	auto loader = priml::SvsLoader{};
+	auto &tiles = pyramid.levels[0].tiles;
+	for (auto ti = 0; ti < kTiles - 1; ++ti) {
+		require( acquire( loader, pyramid, 0, false, ti, kEntry ) >= 0, "Cannot fill the compressed cache" );
+		tiles[ti].last_use.store( priml::version_t( ti + 1 ) );
+	}
+	require( acquire( loader, pyramid, 0, false, kTiles - 1, kEntry ) >= 0, "Pressure acquisition failed" );
+	require( tiles[0].ninbuf < 0 && tiles[1].ninbuf < 0 && tiles[2].ninbuf >= 0 &&
+		tiles[kTiles - 1].ninbuf >= 0 && pyramid.tbf.used_slots() == kTiles - 2 &&
+		pyramid.tbf.allocated_bytes() == ( kTiles - 2 ) * kEntry,
+		"Batch eviction did not free exactly the two oldest entries" );
+}
+
+
 void test_wsi_buffers_topology_ids ()
 {
 	auto topology = priml::CacheTopology::PerPyramid;
@@ -262,6 +326,9 @@ bool run_wsi_buffers_tests ( std::ostream &console, std::ostream *file )
 		std::pair{ "test_wsi_buffers_eviction_reuses_same_level_storage", &test_wsi_buffers_eviction_reuses_same_level_storage },
 		std::pair{ "test_wsi_buffers_eviction_preserves_pinned_cache", &test_wsi_buffers_eviction_preserves_pinned_cache },
 		std::pair{ "test_wsi_buffers_reclaim_idle_cache", &test_wsi_buffers_reclaim_idle_cache },
+		std::pair{ "test_wsi_buffers_variable_entries_exact_bytes", &test_wsi_buffers_variable_entries_exact_bytes },
+		std::pair{ "test_wsi_buffers_variable_entries_share_cap_by_bytes", &test_wsi_buffers_variable_entries_share_cap_by_bytes },
+		std::pair{ "test_wsi_buffers_variable_eviction_frees_oldest_batch", &test_wsi_buffers_variable_eviction_frees_oldest_batch },
 		std::pair{ "test_wsi_buffers_topology_ids", &test_wsi_buffers_topology_ids }
 	};
 	auto passed = true;

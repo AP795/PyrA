@@ -179,9 +179,12 @@ public:
 	virtual bool LoadTile ( Ppyr &pyramid, int level_no, int tile_no,
 		unsigned worker_idx = 0 ) = 0;
 
-// Reads an assembled compressed tile without decoding or disturbing the caches.
+// Reads an assembled compressed tile without decoding it, through the
+// compressed cache like a render: a cached tile is copied from its slot, any
+// other is loaded into one first, so a tile served again is not read again.
+// Counts as a compressed-cache hit or miss and refreshes the tile's LRU stamp.
 // Shared JPEG tables/fragment headers may be assembled; encoded samples survive.
-	bool ReadEncodedTile ( const Ppyr &pyramid, int level_no, int tile_no,
+	bool ReadEncodedTile ( Ppyr &pyramid, int level_no, int tile_no,
 		std::vector<uint8_t> *bytes, std::string *error = nullptr );
 
 // Shared JPEG decompression: reads assembled JPEG from TileBf, decodes into PixBf.
@@ -231,7 +234,8 @@ public:
 		const PlaneSel &sel = {},
 		const Dim2D<int> *sampled = nullptr, int source_border = 0 );
 
-	int AcquireTileBfSlot ( Ppyr &pyramid, int level_no, int tile_no );
+// A compressed entry of exactly `bytes` (the assembled tile's size).
+	int AcquireTileBfSlot ( Ppyr &pyramid, int level_no, int tile_no, size_t bytes );
 	template <typename pixeltype>
 	int AcquirePixBfSlot ( Ppyr &pyramid, int level_no, int tile_no );
 	void ReleaseTileBfSlot ( Ppyr &pyramid, int level_no, int slot );
@@ -294,39 +298,42 @@ protected:
 			}
 		}
 
-		auto slot = AcquireTileBfSlot( pyramid, level_no, tile_no );
+// Assemble first: the entry is sized to the tile, and only assembly knows it.
+		auto *scratch = level.tile_buffer_bytes ? compressed_tile_scratch( level.tile_buffer_bytes ) : nullptr;
+		auto pos = size_t{0};
+		if (!scratch || !assemble( level, tile, scratch, pos, worker_idx ) ||
+			pos == 0 || pos > level.tile_buffer_bytes)
+		{
+			pyr::plog(
+				"wsi tile fail: stage=load lvl=%d tile=%d rect=[%d,%d]-[%d,%d] "
+				"foff=%zu fsz=%zu size=%zu reason=assemble/load failed\n",
+				level_no, tile_no,
+				tile.lr.tl.x, tile.lr.tl.y, tile.lr.br.x, tile.lr.br.y,
+				tile.foff, tile.fsz, pos );
+			tile.sts.store( TileSts::Empty, std::memory_order_release );
+			return false;
+		}
+
+		auto slot = AcquireTileBfSlot( pyramid, level_no, tile_no, pos );
 		if (slot < 0) {
 			pyr::plog(
 				"wsi tile fail: stage=tilebf-alloc lvl=%d tile=%d rect=[%d,%d]-[%d,%d] "
-				"foff=%zu fsz=%zu alloc=%zu used=%d/%d cap=%zu reason=failed to reserve compressed tile buffer slot\n",
+				"foff=%zu fsz=%zu size=%zu held=%zu used=%d cap=%zu reason=failed to reserve compressed tile entry\n",
 				level_no, tile_no,
 				tile.lr.tl.x, tile.lr.tl.y, tile.lr.br.x, tile.lr.br.y,
-				tile.foff, tile.fsz,
-				pyramid.tbf.allocated_bytes(), pyramid.tbf.used_slots(), pyramid.tbf.num_slots(),
+				tile.foff, tile.fsz, pos,
+				pyramid.tbf.allocated_bytes(), pyramid.tbf.used_slots(),
 				pyramid.tbf_cap_bytes );
 			tile.sts.store( TileSts::Empty, std::memory_order_release );
 			return false;
 		}
 
-// Shared is enough: the slot is this tile's alone, and the lock only has to
-// keep the pool from growing (moving) under the write.
-		std::shared_lock tbf_guard( cache_lock( pyramid, false, level_no ) );
-		auto *dest = cache_pool( pyramid, false, level_no ).slot_ptr( slot );
-		auto pos = size_t{0};
-
-		if (!assemble(level, tile, dest, pos, worker_idx)) {
-			pyr::plog(
-				"wsi tile fail: stage=load lvl=%d tile=%d rect=[%d,%d]-[%d,%d] "
-				"foff=%zu fsz=%zu slot=%d reason=assemble/load failed\n",
-				level_no, tile_no,
-				tile.lr.tl.x, tile.lr.tl.y, tile.lr.br.x, tile.lr.br.y,
-				tile.foff, tile.fsz, slot );
-			tbf_guard.unlock();
-			ReleaseTileBfSlot( pyramid, level_no, slot );
-			tile.sts.store( TileSts::Empty, std::memory_order_release );
-			return false;
+// Shared is enough: the entry is this tile's alone, and the lock only keeps the
+// slot table from changing under the write.
+		{
+			std::shared_lock tbf_guard( cache_lock( pyramid, false, level_no ) );
+			std::memcpy( cache_pool( pyramid, false, level_no ).slot_ptr( slot ), scratch, pos );
 		}
-		tbf_guard.unlock();
 
 		tile.ninbuf = slot;
 		tile.bf_sz = pos;
@@ -353,7 +360,13 @@ private:
 	mutable std::mutex tilebf_alloc_mtx_;
 	mutable std::mutex pixbf_alloc_mtx_;
 	void InitializeBufferPools ( Ppyr &pyramid );
-	int AcquireBufferSlot ( Ppyr &pyramid, int level_no, int tile_no, bool decoded );
+// Assembles a decoded (Ready) tile whose compressed slot was evicted into a new
+// slot, its status unchanged. False when no slot can be had or assembly fails.
+	bool RecacheEncodedTile ( Ppyr &pyramid, int level_no, int tile_no );
+// `bytes` is the entry size for a variable-size (compressed) pool; fixed pools
+// ignore it.
+	int AcquireBufferSlot ( Ppyr &pyramid, int level_no, int tile_no, bool decoded,
+		size_t bytes = 0 );
 
 };
 

@@ -58,7 +58,7 @@ bool plan_subset ( WsiSession &source, const Rtlbr<double> &view,
 		!std::isfinite( view.tl.x ) || !std::isfinite( view.tl.y ) ||
 		!std::isfinite( view.br.x ) || !std::isfinite( view.br.y ))
 		return fail( error, "no open WSI or the viewport is empty/invalid" );
-	const auto &pyramid = source.pyramid();
+	auto &pyramid = source.pyramid();
 	const auto metric = pyramid.source_pixel_metric;
 	if (metric.x > 0 && metric.y > 0 && std::abs( metric.x - metric.y ) > metric.x * 1e-5)
 		return fail( error, "unequal X/Y pixel spacing cannot be preserved by this PTF writer" );
